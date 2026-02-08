@@ -32,6 +32,9 @@
     ],
     "remoteUser": "root",
     "containerEnv": {
+        "IS_SANDBOX": "1",
+        "ENABLE_LSP_TOOL": "1",
+        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
     },
     "initializeCommand": "${localWorkspaceFolder}/.devcontainer/initialize_script.sh \"${localWorkspaceFolder}\"",
     "postCreateCommand": "${containerWorkspaceFolder}/.devcontainer/post_create_script.sh \"${containerWorkspaceFolder}\"",
