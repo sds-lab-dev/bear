@@ -1,0 +1,39 @@
+{
+    "name": "Dev Container for Bear AI developer",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": "..",
+        "options": [
+            "--pull"
+        ]
+    },
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "debug.allowBreakpointsEverywhere": true,
+                "rust-analyzer.rustfmt.extraArgs": [
+                    "+nightly-2025-08-07"
+                ],
+                "rust-analyzer.check.command": "check",
+                "rust-analyzer.checkOnSave": true,
+                "rust-analyzer.restartServerOnConfigChange": true
+            },
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "ms-vscode.cpptools",
+                "vadimcn.vscode-lldb"
+            ]
+        }
+    },
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=consistent",
+    "workspaceFolder": "/workspace",
+    "mounts": [
+        "source=bear-persist-volume,target=/persist,type=volume"
+    ],
+    "remoteUser": "root",
+    "containerEnv": {
+    },
+    "initializeCommand": "${localWorkspaceFolder}/.devcontainer/initialize_script.sh \"${localWorkspaceFolder}\"",
+    "postCreateCommand": "${containerWorkspaceFolder}/.devcontainer/post_create_script.sh \"${containerWorkspaceFolder}\"",
+    "postStartCommand": "${containerWorkspaceFolder}/.devcontainer/post_start_script.sh \"${containerWorkspaceFolder}\""
+}
