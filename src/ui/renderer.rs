@@ -1,109 +1,22 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Widget};
 
-use super::app::{App, MessageRole};
+use super::app::{App, ChatMessage, MessageRole};
 
+/// 인라인 뷰포트(입력 영역)만 렌더링.
 pub fn render(frame: &mut Frame, app: &App) {
-    let chunks = Layout::vertical([
-        Constraint::Length(8),
-        Constraint::Length(1),
-        Constraint::Min(1),
-    ])
-    .split(frame.area());
-
-    render_banner(frame, chunks[0]);
-    render_separator(frame, chunks[1]);
-    render_chat(frame, app, chunks[2]);
-}
-
-fn render_banner(frame: &mut Frame, area: Rect) {
-    let columns = Layout::horizontal([
-        Constraint::Length(29),
-        Constraint::Min(1),
-    ])
-    .split(area);
-
-    let bear_lines = vec![
-        Line::from(""),
-        Line::from("       () _ _ ()"),
-        Line::from("      / __  __ \\"),
-        Line::from("/@@\\ /  o    o  \\ /@@\\"),
-        Line::from("\\ @ \\|     ^    |/ @ /"),
-        Line::from(" \\   \\    ___   /   /"),
-        Line::from("  \\   \\________/   /"),
-    ];
-    let bear = Paragraph::new(bear_lines)
-        .style(Style::default().fg(Color::Yellow));
-    frame.render_widget(bear, columns[0]);
-
-    let slogan_lines = vec![
-        Line::from(""),
-        Line::from(""),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Bear: The AI developer that saves your time.",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Bear, your AI developer, does the heavy lifting for you; you just collect your paycheck and don't worry about a thing.",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
-    let slogan = Paragraph::new(slogan_lines)
-        .wrap(Wrap { trim: true });
-    frame.render_widget(slogan, columns[1]);
-}
-
-fn render_separator(frame: &mut Frame, area: Rect) {
-    let line = "─".repeat(area.width as usize);
-    let paragraph = Paragraph::new(Span::styled(
-        line,
-        Style::default().fg(Color::DarkGray),
-    ));
-    frame.render_widget(paragraph, area);
-}
-
-fn render_chat(frame: &mut Frame, app: &App, area: Rect) {
-    let mut lines: Vec<Line> = Vec::new();
+    let area = frame.area();
 
     let separator_style = Style::default().fg(Color::DarkGray);
-    let system_prefix_style = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
     let user_prefix_style = Style::default()
         .fg(Color::Green)
         .add_modifier(Modifier::BOLD);
     let user_text_style = Style::default().fg(Color::Green);
 
-    for message in &app.messages {
-        match message.role {
-            MessageRole::System => {
-                for (i, text_line) in message.content.lines().enumerate() {
-                    if i == 0 {
-                        lines.push(Line::from(vec![
-                            Span::styled("Bear> ", system_prefix_style),
-                            Span::raw(text_line),
-                        ]));
-                    } else {
-                        lines.push(Line::from(format!("      {}", text_line)));
-                    }
-                }
-            }
-            MessageRole::User => {
-                lines.push(Line::from(vec![
-                    Span::styled("You> ", user_prefix_style),
-                    Span::styled(message.content.as_str(), user_text_style),
-                ]));
-            }
-        }
-        lines.push(Line::from(""));
-    }
+    let mut lines: Vec<Line> = Vec::new();
 
     if app.is_waiting_for_input() {
         let cursor = if app.cursor_visible { "█" } else { " " };
@@ -121,9 +34,52 @@ fn render_chat(frame: &mut Frame, app: &App, area: Rect) {
         separator_style,
     )));
 
-    let content_height = lines.len() as u16;
-    let scroll = content_height.saturating_sub(area.height);
+    frame.render_widget(Paragraph::new(lines), area);
+}
 
-    let paragraph = Paragraph::new(lines).scroll((scroll, 0));
-    frame.render_widget(paragraph, area);
+/// 메시지를 insert_before용 라인으로 포맷.
+pub fn render_message_into(message: &ChatMessage, buf: &mut Buffer) {
+    let lines = format_message(message);
+    Paragraph::new(lines).render(buf.area, buf);
+}
+
+/// 메시지의 렌더링 높이(줄 수)를 계산.
+pub fn message_height(message: &ChatMessage) -> u16 {
+    format_message(message).len() as u16
+}
+
+fn format_message(message: &ChatMessage) -> Vec<Line<'static>> {
+    let system_prefix_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let user_prefix_style = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD);
+    let user_text_style = Style::default().fg(Color::Green);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    match message.role {
+        MessageRole::System => {
+            for (i, text_line) in message.content.lines().enumerate() {
+                if i == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled("Bear> ", system_prefix_style),
+                        Span::styled(text_line.to_string(), Style::default()),
+                    ]));
+                } else {
+                    lines.push(Line::from(format!("      {}", text_line)));
+                }
+            }
+        }
+        MessageRole::User => {
+            lines.push(Line::from(vec![
+                Span::styled("You> ", user_prefix_style),
+                Span::styled(message.content.clone(), user_text_style),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+
+    lines
 }

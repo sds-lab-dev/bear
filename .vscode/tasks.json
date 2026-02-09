@@ -1,0 +1,75 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "build"
+            ],
+            "group": "build",
+            "label": "Build",
+            "presentation": {
+                "panel": "dedicated",
+                "clear": true
+            },
+            "options": {
+                "shell": {
+                    "executable": "/bin/bash",
+                    "args": [
+                        "--login",
+                        "-c"
+                    ]
+                }
+            },
+            "dependsOn": "Check",
+            "dependsOrder": "sequence"
+        },
+        {
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "run"
+            ],
+            "group": "build",
+            "label": "Run",
+            "presentation": {
+                "panel": "dedicated",
+                "clear": true
+            },
+            "options": {
+                "shell": {
+                    "executable": "/bin/bash",
+                    "args": [
+                        "--login",
+                        "-c"
+                    ]
+                }
+            },
+            "dependsOn": "Build",
+            "dependsOrder": "sequence"
+        },
+        {
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "check"
+            ],
+            "group": "build",
+            "label": "Check",
+            "presentation": {
+                "panel": "dedicated",
+                "clear": true
+            },
+            "options": {
+                "shell": {
+                    "executable": "/bin/bash",
+                    "args": [
+                        "--login",
+                        "-c"
+                    ]
+                }
+            }
+        }
+    ]
+}

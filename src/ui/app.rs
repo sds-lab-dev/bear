@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -19,12 +19,12 @@ pub struct ChatMessage {
 
 enum InputMode {
     WorkspaceConfirm,
-    WorkspaceInput,
     Done,
 }
 
 pub struct App {
     pub messages: Vec<ChatMessage>,
+    pub printed_message_count: usize,
     input_mode: InputMode,
     pub input_buffer: String,
     pub confirmed_workspace: Option<PathBuf>,
@@ -39,7 +39,7 @@ impl App {
         let current_directory = std::env::current_dir()?;
 
         let initial_message = format!(
-            "현재 디렉토리: {}\n이 디렉토리를 워크스페이스로 사용하시겠습니까? (y/n)",
+            "워크스페이스: {}\n새로운 워크스페이스 절대 경로를 입력하거나, Enter를 눌러 현재 워크스페이스를 사용하세요.",
             current_directory.display()
         );
 
@@ -50,6 +50,7 @@ impl App {
 
         Ok(Self {
             messages,
+            printed_message_count: 0,
             input_mode: InputMode::WorkspaceConfirm,
             input_buffer: String::new(),
             confirmed_workspace: None,
@@ -65,7 +66,6 @@ impl App {
 
         match self.input_mode {
             InputMode::WorkspaceConfirm => self.handle_workspace_confirm(key_event),
-            InputMode::WorkspaceInput => self.handle_workspace_input(key_event),
             InputMode::Done => self.handle_done(key_event),
         }
     }
@@ -77,61 +77,50 @@ impl App {
         }
     }
 
+    pub fn has_unprinted_messages(&self) -> bool {
+        self.printed_message_count < self.messages.len()
+    }
+
     fn reset_cursor_blink(&mut self) {
         self.cursor_visible = true;
         self.cursor_blink_at = Instant::now();
     }
 
     pub fn is_waiting_for_input(&self) -> bool {
-        matches!(
-            self.input_mode,
-            InputMode::WorkspaceConfirm | InputMode::WorkspaceInput
-        )
+        matches!(self.input_mode, InputMode::WorkspaceConfirm)
     }
 
     pub fn help_text(&self) -> &str {
         match self.input_mode {
-            InputMode::WorkspaceConfirm => "[Y] 예  [N] 아니오  [Q/Esc] 종료",
-            InputMode::WorkspaceInput => "[Enter] 확인  [Esc] 종료",
-            InputMode::Done => "[Q/Esc] 종료",
+            InputMode::WorkspaceConfirm => "[Enter] 확인  [Esc] 종료",
+            InputMode::Done => "[Esc] 종료",
         }
     }
 
     fn handle_workspace_confirm(&mut self, key_event: KeyEvent) {
         match key_event.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                self.add_user_message("Y");
-                self.confirmed_workspace = Some(self.current_directory.clone());
-                let path = self.current_directory.display().to_string();
-                self.add_system_message(&format!("워크스페이스가 설정되었습니다: {}", path));
-                self.input_mode = InputMode::Done;
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') => {
-                self.add_user_message("N");
-                self.add_system_message("워크스페이스 디렉토리 경로를 입력하세요:");
-                self.input_mode = InputMode::WorkspaceInput;
-            }
-            KeyCode::Char('q') | KeyCode::Esc => {
-                self.should_quit = true;
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_workspace_input(&mut self, key_event: KeyEvent) {
-        match key_event.code {
             KeyCode::Enter => {
                 let trimmed = self.input_buffer.trim().to_string();
-                if !trimmed.is_empty() {
-                    self.add_user_message(&trimmed);
-                    self.confirmed_workspace = Some(PathBuf::from(&trimmed));
-                    self.add_system_message(&format!(
-                        "워크스페이스가 설정되었습니다: {}",
-                        trimmed
-                    ));
-                    self.input_buffer.clear();
-                    self.input_mode = InputMode::Done;
-                }
+                let workspace = if trimmed.is_empty() {
+                    self.current_directory.clone()
+                } else {
+                    let path = PathBuf::from(&trimmed);
+                    if let Some(error_message) = validate_workspace_path(&path) {
+                        self.add_user_message(&trimmed);
+                        self.add_system_message(&error_message);
+                        self.input_buffer.clear();
+                        return;
+                    }
+                    path
+                };
+                self.add_user_message(&workspace.display().to_string());
+                self.add_system_message(&format!(
+                    "워크스페이스가 설정되었습니다: {}",
+                    workspace.display()
+                ));
+                self.confirmed_workspace = Some(workspace);
+                self.input_buffer.clear();
+                self.input_mode = InputMode::Done;
             }
             KeyCode::Backspace => {
                 self.input_buffer.pop();
@@ -147,11 +136,8 @@ impl App {
     }
 
     fn handle_done(&mut self, key_event: KeyEvent) {
-        match key_event.code {
-            KeyCode::Char('q') | KeyCode::Esc => {
-                self.should_quit = true;
-            }
-            _ => {}
+        if key_event.code == KeyCode::Esc {
+            self.should_quit = true;
         }
     }
 
@@ -168,4 +154,21 @@ impl App {
             content: content.to_string(),
         });
     }
+}
+
+/// 워크스페이스 경로 검증. 문제가 있으면 에러 메시지를, 없으면 None을 반환.
+fn validate_workspace_path(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return Some(format!(
+            "절대 경로를 입력해야 합니다: {}\n새로운 워크스페이스 절대 경로를 입력하거나, Enter를 눌러 현재 워크스페이스를 사용하세요.",
+            path.display()
+        ));
+    }
+    if !path.is_dir() {
+        return Some(format!(
+            "존재하지 않는 디렉토리입니다: {}\n새로운 워크스페이스 절대 경로를 입력하거나, Enter를 눌러 현재 워크스페이스를 사용하세요.",
+            path.display()
+        ));
+    }
+    None
 }

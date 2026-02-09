@@ -10,6 +10,7 @@ CARGO_MANIFEST_PATH = Cargo.toml
 
 # Use `make build ARGS="--release"` for release mode or other arguments.
 build:
+	cargo clippy --manifest-path $(CARGO_MANIFEST_PATH) -- -D warnings --no-deps
 	COMMIT_HASH=$(COMMIT_HASH) \
 	cargo build \
 		--manifest-path $(CARGO_MANIFEST_PATH) \
