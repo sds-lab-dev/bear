@@ -11,3 +11,4 @@ which = "7"
 uuid = { version = "1", features = ["v4"] }
 ratatui = "0.29"
 crossterm = "0.28"
+unicode-width = "0.2"

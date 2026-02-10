@@ -115,7 +115,16 @@ impl ClaudeCodeClient {
             });
         }
 
-        let response: CliResponse = serde_json::from_slice(&output.stdout)?;
+        // CLI는 JSON 배열 형태로 여러 메시지를 출력한다. 그 중 "type": "result"인
+        // 마지막 요소만 추출해서 파싱한다.
+        let messages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)?;
+        let result_value = messages
+            .into_iter()
+            .rev()
+            .find(|msg| msg.get("type").and_then(|v| v.as_str()) == Some("result"))
+            .ok_or(ClaudeCodeClientError::NoResultMessage)?;
+
+        let response: CliResponse = serde_json::from_value(result_value)?;
         if response.is_error {
             return Err(ClaudeCodeClientError::CliReturnedError {
                 message: response.result.unwrap_or_default(),

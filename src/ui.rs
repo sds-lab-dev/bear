@@ -1,4 +1,5 @@
 pub mod app;
+mod clarification;
 mod error;
 mod event;
 mod renderer;
@@ -9,24 +10,25 @@ use std::io::stdout;
 use std::time::Duration;
 
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
-    KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, EnableBracketedPaste,
+    Event, KeyEventKind, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+use crate::config::Config;
 use app::App;
 
-pub fn run() -> Result<(), UiError> {
+pub fn run(config: Config) -> Result<(), UiError> {
     terminal::enable_raw_mode()?;
-    crossterm::execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    crossterm::execute!(stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
 
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new()?;
+    let mut app = App::new(config)?;
 
     let keyboard_enhancement_enabled = crossterm::terminal::supports_keyboard_enhancement()
         .unwrap_or(false);
@@ -49,11 +51,9 @@ pub fn run() -> Result<(), UiError> {
                 Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
                     app.handle_key_event(key_event);
                 }
-                Event::Mouse(mouse_event) => match mouse_event.kind {
-                    MouseEventKind::ScrollUp => app.scroll_up(),
-                    MouseEventKind::ScrollDown => app.scroll_down(),
-                    _ => {}
-                },
+                Event::Paste(text) => {
+                    app.handle_paste(text);
+                }
                 _ => {}
             }
         }
@@ -67,7 +67,7 @@ pub fn run() -> Result<(), UiError> {
         crossterm::execute!(stdout(), PopKeyboardEnhancementFlags)?;
     }
 
-    crossterm::execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
+    crossterm::execute!(stdout(), DisableBracketedPaste, LeaveAlternateScreen)?;
     terminal::disable_raw_mode()?;
 
     Ok(())

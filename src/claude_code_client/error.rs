@@ -23,4 +23,7 @@ pub enum ClaudeCodeClientError {
 
     #[error("structured_output field is missing from the response")]
     MissingStructuredOutput,
+
+    #[error("no result message found in CLI output")]
+    NoResultMessage,
 }

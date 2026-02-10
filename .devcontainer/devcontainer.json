@@ -21,7 +21,8 @@
             "extensions": [
                 "rust-lang.rust-analyzer",
                 "ms-vscode.cpptools",
-                "vadimcn.vscode-lldb"
+                "vadimcn.vscode-lldb",
+                "github.copilot-chat"
             ]
         }
     },

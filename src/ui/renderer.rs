@@ -2,6 +2,7 @@ use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthChar;
 
 use super::app::{App, ChatMessage, MessageRole};
 
@@ -42,7 +43,17 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             cursor,
             user_prefix_style,
             user_text_style,
+            area.width,
         ));
+    } else if app.is_thinking() {
+        let system_prefix_style = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        let thinking_style = Style::default().fg(Color::Yellow);
+        lines.push(Line::from(vec![
+            Span::styled("Bear> ", system_prefix_style),
+            Span::styled(app.thinking_indicator().to_string(), thinking_style),
+        ]));
     } else {
         lines.push(Line::from(""));
     }
@@ -172,27 +183,66 @@ fn build_input_lines<'a>(
     cursor: &'a str,
     prefix_style: Style,
     text_style: Style,
+    max_width: u16,
 ) -> Vec<Line<'a>> {
+    let prefix_len = 5; // "You> " or "     "
+    let cursor_reserved = 1;
+    let text_width = (max_width as usize).saturating_sub(prefix_len + cursor_reserved);
+
     let mut lines = Vec::new();
-    let input_lines: Vec<&str> = input_buffer.split('\n').collect();
+    let logical_lines: Vec<&str> = input_buffer.split('\n').collect();
+    let logical_count = logical_lines.len();
 
-    for (i, text_line) in input_lines.iter().enumerate() {
-        let is_last = i == input_lines.len() - 1;
-        let prefix = if i == 0 { "You> " } else { "     " };
+    for (logical_idx, logical_line) in logical_lines.iter().enumerate() {
+        let is_last_logical = logical_idx == logical_count - 1;
+        let visual_lines = wrap_text_by_char_width(logical_line, text_width);
+        let visual_count = visual_lines.len();
 
-        let mut spans = vec![
-            Span::styled(prefix.to_string(), if i == 0 { prefix_style } else { Style::default() }),
-            Span::styled(text_line.to_string(), text_style),
-        ];
+        for (visual_idx, visual_text) in visual_lines.iter().enumerate() {
+            let is_first = logical_idx == 0 && visual_idx == 0;
+            let is_last = is_last_logical && visual_idx == visual_count - 1;
 
-        if is_last {
-            spans.push(Span::styled(cursor.to_string(), text_style));
+            let prefix = if is_first { "You> " } else { "     " };
+            let current_prefix_style = if is_first { prefix_style } else { Style::default() };
+
+            let mut spans = vec![
+                Span::styled(prefix.to_string(), current_prefix_style),
+                Span::styled(visual_text.to_string(), text_style),
+            ];
+
+            if is_last {
+                spans.push(Span::styled(cursor.to_string(), text_style));
+            }
+
+            lines.push(Line::from(spans));
         }
-
-        lines.push(Line::from(spans));
     }
 
     lines
+}
+
+fn wrap_text_by_char_width(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![text.to_string()];
+    }
+
+    let mut result = Vec::new();
+    let mut current_line = String::new();
+    let mut current_width: usize = 0;
+
+    for ch in text.chars() {
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_width + char_width > max_width && current_width > 0 {
+            result.push(current_line);
+            current_line = String::new();
+            current_width = 0;
+        }
+        current_line.push(ch);
+        current_width += char_width;
+    }
+
+    result.push(current_line);
+    result
 }
 
 fn wrap_words(text: &str, max_width: usize) -> Vec<String> {
