@@ -46,9 +46,12 @@ You are generating a HANDOFF DOCUMENT for the next task. The goal is to reset th
 - Authoring agent/session: <if applicable>
 
 ## Initial user request
-- Write the exact message verbatim (1:1) that the user requested when this session begins.
+<INITIAL_USER_REQUEST>
+- Write the exact message verbatim (1:1) that the user requested when this session begins inside the `<INITIAL_USER_REQUEST>` tag.
+- To prevent the Markdown template of this handoff document from being mixed with the user's original message, you MUST include the user's message exclusively inside the `<INITIAL_USER_REQUEST>` tag and nowhere else.
 - Do NOT paraphrase, summarize, translate, correct typos, change formatting, or omit any content.
 - Preserve every character exactly as written, including punctuation, whitespace, line breaks, code blocks, and any special symbols.
+</INITIAL_USER_REQUEST>
 
 ## Scope Summary
 Describe in 3–8 sentences:
