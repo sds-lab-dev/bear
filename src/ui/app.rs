@@ -8,6 +8,7 @@ use crate::claude_code_client::{ClaudeCodeClient, ClaudeCodeRequest};
 use crate::config::Config;
 use super::clarification::{self, ClarificationQuestions, QaRound};
 use super::error::UiError;
+use super::renderer::wrap_text_by_char_width;
 
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -38,6 +39,8 @@ pub struct App {
     pub messages: Vec<ChatMessage>,
     input_mode: InputMode,
     pub input_buffer: String,
+    pub cursor_position: usize,
+    pub terminal_width: u16,
     pub confirmed_workspace: Option<PathBuf>,
     pub confirmed_requirements: Option<String>,
     pub should_quit: bool,
@@ -72,6 +75,8 @@ impl App {
             messages,
             input_mode: InputMode::WorkspaceConfirm,
             input_buffer: String::new(),
+            cursor_position: 0,
+            terminal_width: 80,
             confirmed_workspace: None,
             confirmed_requirements: None,
             should_quit: false,
@@ -126,11 +131,11 @@ impl App {
         match self.input_mode {
             InputMode::WorkspaceConfirm => {
                 let cleaned = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
-                self.input_buffer.push_str(&cleaned);
+                self.insert_text_at_cursor(&cleaned);
             }
             InputMode::RequirementsInput | InputMode::ClarificationAnswer => {
                 let cleaned = text.replace("\r\n", "\n").replace('\r', "\n");
-                self.input_buffer.push_str(&cleaned);
+                self.insert_text_at_cursor(&cleaned);
             }
             InputMode::AgentThinking | InputMode::Done => {}
         }
@@ -236,7 +241,7 @@ impl App {
                     if let Some(error_message) = validate_workspace_path(&path) {
                         self.add_user_message(&trimmed);
                         self.add_system_message(&error_message);
-                        self.input_buffer.clear();
+                        self.clear_input();
                         return;
                     }
                     path
@@ -247,17 +252,23 @@ impl App {
                     workspace.display()
                 ));
                 self.confirmed_workspace = Some(workspace);
-                self.input_buffer.clear();
+                self.clear_input();
                 self.transition_to_requirements_input();
             }
             KeyCode::Backspace => {
-                self.input_buffer.pop();
+                self.delete_char_before_cursor();
+            }
+            KeyCode::Left => {
+                self.move_cursor_left();
+            }
+            KeyCode::Right => {
+                self.move_cursor_right();
             }
             KeyCode::Esc => {
                 self.should_quit = true;
             }
             KeyCode::Char(c) => {
-                self.input_buffer.push(c);
+                self.insert_char_at_cursor(c);
             }
             _ => {}
         }
@@ -270,19 +281,31 @@ impl App {
     ) {
         match key_event.code {
             KeyCode::Enter if self.is_newline_modifier(key_event.modifiers) => {
-                self.input_buffer.push('\n');
+                self.insert_char_at_cursor('\n');
             }
             KeyCode::Enter => {
                 submit_action(self);
             }
             KeyCode::Backspace => {
-                self.input_buffer.pop();
+                self.delete_char_before_cursor();
+            }
+            KeyCode::Left => {
+                self.move_cursor_left();
+            }
+            KeyCode::Right => {
+                self.move_cursor_right();
+            }
+            KeyCode::Up => {
+                self.move_cursor_up();
+            }
+            KeyCode::Down => {
+                self.move_cursor_down();
             }
             KeyCode::Esc => {
                 self.should_quit = true;
             }
             KeyCode::Char(c) => {
-                self.input_buffer.push(c);
+                self.insert_char_at_cursor(c);
             }
             _ => {}
         }
@@ -301,7 +324,7 @@ impl App {
 
         self.add_user_message(&requirements);
         self.confirmed_requirements = Some(requirements);
-        self.input_buffer.clear();
+        self.clear_input();
 
         if let Err(error_message) = self.ensure_claude_client() {
             self.add_system_message(&format!("클라이언트 생성 실패: {}", error_message));
@@ -320,7 +343,7 @@ impl App {
         }
 
         self.add_user_message(&answer);
-        self.input_buffer.clear();
+        self.clear_input();
 
         let questions = std::mem::take(&mut self.current_round_questions);
         self.qa_log.push(QaRound { questions, answer });
@@ -398,6 +421,117 @@ impl App {
         }
     }
 
+    fn insert_char_at_cursor(&mut self, c: char) {
+        let byte_pos = char_to_byte_index(&self.input_buffer, self.cursor_position);
+        self.input_buffer.insert(byte_pos, c);
+        self.cursor_position += 1;
+    }
+
+    fn insert_text_at_cursor(&mut self, text: &str) {
+        let byte_pos = char_to_byte_index(&self.input_buffer, self.cursor_position);
+        self.input_buffer.insert_str(byte_pos, text);
+        self.cursor_position += text.chars().count();
+    }
+
+    fn delete_char_before_cursor(&mut self) {
+        if self.cursor_position == 0 {
+            return;
+        }
+        self.cursor_position -= 1;
+        let byte_pos = char_to_byte_index(&self.input_buffer, self.cursor_position);
+        self.input_buffer.remove(byte_pos);
+    }
+
+    fn clear_input(&mut self) {
+        self.input_buffer.clear();
+        self.cursor_position = 0;
+    }
+
+    fn move_cursor_left(&mut self) {
+        if self.cursor_position > 0 {
+            self.cursor_position -= 1;
+        }
+    }
+
+    fn move_cursor_right(&mut self) {
+        if self.cursor_position < self.input_buffer.chars().count() {
+            self.cursor_position += 1;
+        }
+    }
+
+    fn move_cursor_up(&mut self) {
+        let visual_lines = self.compute_visual_lines();
+        let (current_line, current_col) = find_cursor_visual_position(
+            self.cursor_position,
+            &visual_lines,
+        );
+
+        if current_line == 0 {
+            return;
+        }
+
+        let target = &visual_lines[current_line - 1];
+        let max_col = if target.is_last_of_logical {
+            target.char_count
+        } else {
+            target.char_count.saturating_sub(1)
+        };
+        self.cursor_position = target.char_start + current_col.min(max_col);
+    }
+
+    fn move_cursor_down(&mut self) {
+        let visual_lines = self.compute_visual_lines();
+        let (current_line, current_col) = find_cursor_visual_position(
+            self.cursor_position,
+            &visual_lines,
+        );
+
+        if current_line >= visual_lines.len() - 1 {
+            return;
+        }
+
+        let target = &visual_lines[current_line + 1];
+        let max_col = if target.is_last_of_logical {
+            target.char_count
+        } else {
+            target.char_count.saturating_sub(1)
+        };
+        self.cursor_position = target.char_start + current_col.min(max_col);
+    }
+
+    fn compute_visual_lines(&self) -> Vec<VisualLineInfo> {
+        let prefix_len = 5; // "You> " or "     "
+        let cursor_reserved = 1;
+        let text_width = (self.terminal_width as usize).saturating_sub(prefix_len + cursor_reserved);
+
+        let logical_lines: Vec<&str> = self.input_buffer.split('\n').collect();
+        let mut result = Vec::new();
+        let mut global_char_offset = 0;
+
+        for (logical_idx, logical_line) in logical_lines.iter().enumerate() {
+            let wrapped = wrap_text_by_char_width(logical_line, text_width);
+            let wrap_count = wrapped.len();
+            let mut line_char_offset = 0;
+
+            for (wrap_idx, visual_text) in wrapped.iter().enumerate() {
+                let char_count = visual_text.chars().count();
+                result.push(VisualLineInfo {
+                    char_start: global_char_offset + line_char_offset,
+                    char_count,
+                    is_last_of_logical: wrap_idx == wrap_count - 1,
+                });
+                line_char_offset += char_count;
+            }
+
+            global_char_offset += logical_line.chars().count();
+            if logical_idx < logical_lines.len() - 1 {
+                global_char_offset += 1; // '\n'
+            }
+        }
+
+        result
+    }
+
     fn add_system_message(&mut self, content: &str) {
         self.messages.push(ChatMessage {
             role: MessageRole::System,
@@ -413,6 +547,39 @@ impl App {
         });
         self.scroll_offset = 0;
     }
+}
+
+struct VisualLineInfo {
+    char_start: usize,
+    char_count: usize,
+    is_last_of_logical: bool,
+}
+
+fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
+}
+
+fn find_cursor_visual_position(
+    cursor_position: usize,
+    visual_lines: &[VisualLineInfo],
+) -> (usize, usize) {
+    for (i, vl) in visual_lines.iter().enumerate() {
+        let vl_end = vl.char_start + vl.char_count;
+
+        if cursor_position >= vl.char_start && cursor_position < vl_end {
+            return (i, cursor_position - vl.char_start);
+        }
+
+        if cursor_position == vl_end && vl.is_last_of_logical {
+            return (i, vl.char_count);
+        }
+    }
+
+    let last = visual_lines.len().saturating_sub(1);
+    (last, visual_lines.get(last).map_or(0, |vl| vl.char_count))
 }
 
 /// 워크스페이스 경로 검증. 문제가 있으면 에러 메시지를, 없으면 None을 반환.

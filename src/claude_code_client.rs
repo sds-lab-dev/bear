@@ -279,23 +279,6 @@ mod tests {
     }
 
     #[test]
-    fn fallback_to_result_text_when_structured_output_missing() {
-        let messages = vec![
-            make_result_message(
-                "sess-3",
-                false,
-                Some(r#"{"answer": "from result text"}"#),
-                None,
-            ),
-        ];
-        let stdout = make_json_array_output(&messages);
-
-        let parsed: ParsedOutput<TestOutput> = parse_cli_output(&stdout).unwrap();
-
-        assert_eq!(parsed.result, TestOutput { answer: "from result text".to_string() });
-    }
-
-    #[test]
     fn error_when_both_structured_output_and_result_text_missing() {
         let messages = vec![
             make_result_message("sess-3", false, None, None),

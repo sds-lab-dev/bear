@@ -32,14 +32,17 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     lines.extend(build_banner_lines(area.width));
 
+    app.terminal_width = area.width;
+
     for message in &app.messages {
-        lines.extend(format_message(message));
+        lines.extend(format_message(message, area.width));
     }
 
     if app.is_waiting_for_input() {
         let cursor = if app.cursor_visible { "█" } else { " " };
         lines.extend(build_input_lines(
             &app.input_buffer,
+            app.cursor_position,
             cursor,
             user_prefix_style,
             user_text_style,
@@ -109,7 +112,7 @@ fn build_banner_lines(width: u16) -> Vec<Line<'static>> {
     lines
 }
 
-fn format_message(message: &ChatMessage) -> Vec<Line<'static>> {
+fn format_message(message: &ChatMessage, max_width: u16) -> Vec<Line<'static>> {
     let system_prefix_style = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
@@ -122,29 +125,41 @@ fn format_message(message: &ChatMessage) -> Vec<Line<'static>> {
 
     match message.role {
         MessageRole::System => {
-            for (i, text_line) in message.content.lines().enumerate() {
-                if i == 0 {
-                    lines.push(Line::from(vec![
-                        Span::styled("Bear> ", system_prefix_style),
-                        Span::styled(text_line.to_string(), Style::default()),
-                    ]));
-                } else {
-                    lines.push(Line::from(format!("      {}", text_line)));
+            let text_width = (max_width as usize).saturating_sub(6); // "Bear> " = 6
+            let mut is_first = true;
+
+            for text_line in message.content.lines() {
+                for visual_line in wrap_text_by_char_width(text_line, text_width) {
+                    if is_first {
+                        lines.push(Line::from(vec![
+                            Span::styled("Bear> ", system_prefix_style),
+                            Span::styled(visual_line, Style::default()),
+                        ]));
+                        is_first = false;
+                    } else {
+                        lines.push(Line::from(format!("      {}", visual_line)));
+                    }
                 }
             }
         }
         MessageRole::User => {
-            for (i, text_line) in message.content.lines().enumerate() {
-                if i == 0 {
-                    lines.push(Line::from(vec![
-                        Span::styled("You> ", user_prefix_style),
-                        Span::styled(text_line.to_string(), user_text_style),
-                    ]));
-                } else {
-                    lines.push(Line::from(Span::styled(
-                        format!("     {}", text_line),
-                        user_text_style,
-                    )));
+            let text_width = (max_width as usize).saturating_sub(5); // "You> " = 5
+            let mut is_first = true;
+
+            for text_line in message.content.lines() {
+                for visual_line in wrap_text_by_char_width(text_line, text_width) {
+                    if is_first {
+                        lines.push(Line::from(vec![
+                            Span::styled("You> ", user_prefix_style),
+                            Span::styled(visual_line, user_text_style),
+                        ]));
+                        is_first = false;
+                    } else {
+                        lines.push(Line::from(Span::styled(
+                            format!("     {}", visual_line),
+                            user_text_style,
+                        )));
+                    }
                 }
             }
         }
@@ -180,7 +195,8 @@ fn build_right_column(max_width: usize) -> Vec<(String, Color, bool)> {
 
 fn build_input_lines<'a>(
     input_buffer: &str,
-    cursor: &'a str,
+    cursor_position: usize,
+    cursor_char: &'a str,
     prefix_style: Style,
     text_style: Style,
     max_width: u16,
@@ -191,37 +207,82 @@ fn build_input_lines<'a>(
 
     let mut lines = Vec::new();
     let logical_lines: Vec<&str> = input_buffer.split('\n').collect();
-    let logical_count = logical_lines.len();
+
+    let mut global_char_offset = 0;
+    let mut is_first_visual_line = true;
 
     for (logical_idx, logical_line) in logical_lines.iter().enumerate() {
-        let is_last_logical = logical_idx == logical_count - 1;
         let visual_lines = wrap_text_by_char_width(logical_line, text_width);
-        let visual_count = visual_lines.len();
+        let visual_line_count = visual_lines.len();
+        let mut line_char_offset = 0;
 
         for (visual_idx, visual_text) in visual_lines.iter().enumerate() {
-            let is_first = logical_idx == 0 && visual_idx == 0;
-            let is_last = is_last_logical && visual_idx == visual_count - 1;
+            let visual_char_count = visual_text.chars().count();
+            let visual_start = global_char_offset + line_char_offset;
+            let is_last_visual_of_logical = visual_idx == visual_line_count - 1;
 
-            let prefix = if is_first { "You> " } else { "     " };
-            let current_prefix_style = if is_first { prefix_style } else { Style::default() };
+            let cursor_col = cursor_column_on_visual_line(
+                cursor_position,
+                visual_start,
+                visual_char_count,
+                is_last_visual_of_logical,
+            );
 
-            let mut spans = vec![
-                Span::styled(prefix.to_string(), current_prefix_style),
-                Span::styled(visual_text.to_string(), text_style),
-            ];
+            let prefix = if is_first_visual_line { "You> " } else { "     " };
+            let current_prefix_style = if is_first_visual_line {
+                prefix_style
+            } else {
+                Style::default()
+            };
 
-            if is_last {
-                spans.push(Span::styled(cursor.to_string(), text_style));
+            let mut spans = vec![Span::styled(prefix.to_string(), current_prefix_style)];
+
+            if let Some(col) = cursor_col {
+                let before: String = visual_text.chars().take(col).collect();
+                let after: String = visual_text.chars().skip(col).collect();
+                spans.push(Span::styled(before, text_style));
+                spans.push(Span::styled(cursor_char.to_string(), text_style));
+                spans.push(Span::styled(after, text_style));
+            } else {
+                spans.push(Span::styled(visual_text.to_string(), text_style));
             }
 
             lines.push(Line::from(spans));
+
+            line_char_offset += visual_char_count;
+            is_first_visual_line = false;
+        }
+
+        global_char_offset += logical_line.chars().count();
+        if logical_idx < logical_lines.len() - 1 {
+            global_char_offset += 1; // '\n'
         }
     }
 
     lines
 }
 
-fn wrap_text_by_char_width(text: &str, max_width: usize) -> Vec<String> {
+/// 커서가 이 visual line 위에 있으면 해당 컬럼을, 아니면 None을 반환.
+fn cursor_column_on_visual_line(
+    cursor_position: usize,
+    visual_start: usize,
+    visual_char_count: usize,
+    is_last_visual_of_logical: bool,
+) -> Option<usize> {
+    let visual_end = visual_start + visual_char_count;
+
+    if cursor_position >= visual_start && cursor_position < visual_end {
+        return Some(cursor_position - visual_start);
+    }
+
+    if cursor_position == visual_end && is_last_visual_of_logical {
+        return Some(visual_char_count);
+    }
+
+    None
+}
+
+pub(super) fn wrap_text_by_char_width(text: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];
     }
