@@ -71,6 +71,14 @@ pub struct ClaudeCodeClient {
 }
 
 impl ClaudeCodeClient {
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    pub fn reset_session(&mut self) {
+        self.session_id = None;
+    }
+
     pub fn new(
         api_key: String,
         additional_work_directories: Vec<PathBuf>,
@@ -193,6 +201,7 @@ impl ClaudeCodeClient {
     {
         let (mut command, new_session_id) = self.build_base_command(request);
         command.arg("--output-format").arg("stream-json");
+        command.arg("--verbose");
         command.arg("--include-partial-messages");
         command.arg(&request.user_prompt);
 

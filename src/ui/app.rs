@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::claude_code_client::{ClaudeCodeClient, ClaudeCodeRequest};
 use crate::config::Config;
 use super::clarification::{self, ClarificationQuestions, QaRound};
+use super::spec_writing::{self, SpecJournal, SpecResponseType, SpecWritingResponse};
 use super::error::UiError;
 use super::renderer::{USER_PREFIX, wrap_text_by_char_width};
 
@@ -27,12 +28,19 @@ enum InputMode {
     RequirementsInput,
     AgentThinking,
     ClarificationAnswer,
+    SpecClarificationAnswer,
+    SpecFeedback,
     Done,
+}
+
+enum AgentOutcome {
+    Clarification(ClarificationQuestions),
+    SpecWriting(SpecWritingResponse),
 }
 
 struct AgentThreadResult {
     client: ClaudeCodeClient,
-    outcome: Result<ClarificationQuestions, String>,
+    outcome: Result<AgentOutcome, String>,
 }
 
 enum AgentStreamMessage {
@@ -61,6 +69,9 @@ pub struct App {
     qa_log: Vec<QaRound>,
     current_round_questions: Vec<String>,
     thinking_started_at: Instant,
+    journal: Option<SpecJournal>,
+    last_spec_draft: Option<String>,
+    spec_clarification_questions: Vec<String>,
 }
 
 impl App {
@@ -98,6 +109,9 @@ impl App {
             qa_log: Vec::new(),
             current_round_questions: Vec::new(),
             thinking_started_at: Instant::now(),
+            journal: None,
+            last_spec_draft: None,
+            spec_clarification_questions: Vec::new(),
         })
     }
 
@@ -124,6 +138,18 @@ impl App {
             InputMode::ClarificationAnswer => {
                 self.handle_multiline_input(key_event, Self::submit_clarification_answer);
             }
+            InputMode::SpecClarificationAnswer => {
+                self.handle_multiline_input(key_event, Self::submit_spec_clarification_answer);
+            }
+            InputMode::SpecFeedback => {
+                if key_event.code == KeyCode::Char('a')
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    self.approve_spec();
+                } else {
+                    self.handle_multiline_input(key_event, Self::submit_spec_feedback);
+                }
+            }
             InputMode::AgentThinking | InputMode::Done => {
                 if key_event.code == KeyCode::Esc {
                     self.should_quit = true;
@@ -140,7 +166,10 @@ impl App {
                 let cleaned = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
                 self.insert_text_at_cursor(&cleaned);
             }
-            InputMode::RequirementsInput | InputMode::ClarificationAnswer => {
+            InputMode::RequirementsInput
+            | InputMode::ClarificationAnswer
+            | InputMode::SpecClarificationAnswer
+            | InputMode::SpecFeedback => {
                 let cleaned = text.replace("\r\n", "\n").replace('\r', "\n");
                 self.insert_text_at_cursor(&cleaned);
             }
@@ -174,7 +203,12 @@ impl App {
                 Ok(AgentStreamMessage::Completed(result)) => {
                     self.claude_client = Some(result.client);
                     match result.outcome {
-                        Ok(response) => self.handle_clarification_response(response),
+                        Ok(AgentOutcome::Clarification(response)) => {
+                            self.handle_clarification_response(response);
+                        }
+                        Ok(AgentOutcome::SpecWriting(response)) => {
+                            self.handle_spec_response(response);
+                        }
                         Err(error_message) => self.handle_agent_error(error_message),
                     }
                     return;
@@ -213,7 +247,11 @@ impl App {
     pub fn is_waiting_for_input(&self) -> bool {
         matches!(
             self.input_mode,
-            InputMode::WorkspaceConfirm | InputMode::RequirementsInput | InputMode::ClarificationAnswer
+            InputMode::WorkspaceConfirm
+                | InputMode::RequirementsInput
+                | InputMode::ClarificationAnswer
+                | InputMode::SpecClarificationAnswer
+                | InputMode::SpecFeedback
         )
     }
 
@@ -234,11 +272,20 @@ impl App {
     pub fn help_text(&self) -> &str {
         match self.input_mode {
             InputMode::WorkspaceConfirm => "[Enter] Confirm  [PgUp/PgDn] Scroll  [Esc] Quit",
-            InputMode::RequirementsInput | InputMode::ClarificationAnswer => {
+            InputMode::RequirementsInput
+            | InputMode::ClarificationAnswer
+            | InputMode::SpecClarificationAnswer => {
                 if self.keyboard_enhancement_enabled {
                     "[Enter] Submit  [Shift+Enter] New line  [PgUp/PgDn] Scroll  [Esc] Quit"
                 } else {
                     "[Enter] Submit  [Alt+Enter] New line  [PgUp/PgDn] Scroll  [Esc] Quit"
+                }
+            }
+            InputMode::SpecFeedback => {
+                if self.keyboard_enhancement_enabled {
+                    "[Enter] Submit feedback  [Ctrl+A] Approve  [Shift+Enter] New line  [PgUp/PgDn] Scroll  [Esc] Quit"
+                } else {
+                    "[Enter] Submit feedback  [Ctrl+A] Approve  [Alt+Enter] New line  [PgUp/PgDn] Scroll  [Esc] Quit"
                 }
             }
             InputMode::AgentThinking | InputMode::Done => "[PgUp/PgDn] Scroll  [Esc] Quit",
@@ -327,7 +374,7 @@ impl App {
     }
 
     fn transition_to_requirements_input(&mut self) {
-        self.add_system_message("구현할 요구사항을 입력하세요. Shitft + Enter로 여러 줄 입력이 가능합니다.");
+        self.add_system_message("구현할 요구사항을 입력하세요.");
         self.input_mode = InputMode::RequirementsInput;
     }
 
@@ -403,6 +450,7 @@ impl App {
                 .query_streaming::<ClarificationQuestions, _>(&request, |line| {
                     let _ = stream_sender.send(AgentStreamMessage::StreamLine(line));
                 })
+                .map(AgentOutcome::Clarification)
                 .map_err(|err| err.to_string());
 
             let _ = sender.send(AgentStreamMessage::Completed(AgentThreadResult { client, outcome }));
@@ -411,8 +459,8 @@ impl App {
 
     fn handle_clarification_response(&mut self, response: ClarificationQuestions) {
         if response.questions.is_empty() {
-            self.add_system_message("요구사항 분석이 완료되었습니다.");
-            self.input_mode = InputMode::Done;
+            self.add_system_message("요구사항 분석이 완료되었습니다. 스펙 문서를 작성합니다.");
+            self.start_spec_writing_query(true);
             return;
         }
 
@@ -428,6 +476,176 @@ impl App {
 
     fn handle_agent_error(&mut self, error_message: String) {
         self.add_system_message(&format!("에이전트 오류: {}", error_message));
+        self.input_mode = InputMode::Done;
+    }
+
+    fn start_spec_writing_query(&mut self, is_initial: bool) {
+        let mut client = self.claude_client.take().expect("client must be available");
+
+        if is_initial {
+            client.reset_session();
+        }
+
+        let original_request = self.confirmed_requirements.clone().unwrap();
+        let qa_log = self.qa_log.clone();
+        let user_feedback = if is_initial {
+            None
+        } else {
+            self.messages
+                .iter()
+                .rev()
+                .find(|m| matches!(m.role, MessageRole::User))
+                .map(|m| m.content.clone())
+        };
+
+        let (sender, receiver) = mpsc::channel();
+        self.agent_result_receiver = Some(receiver);
+        self.input_mode = InputMode::AgentThinking;
+        self.thinking_started_at = Instant::now();
+
+        std::thread::spawn(move || {
+            let user_prompt = if is_initial {
+                spec_writing::build_initial_spec_prompt(&original_request, &qa_log)
+            } else {
+                let feedback = user_feedback.unwrap_or_default();
+                spec_writing::build_revision_prompt(&feedback)
+            };
+
+            let request = ClaudeCodeRequest {
+                system_prompt: Some(clarification::system_prompt().to_string()),
+                user_prompt,
+                model: None,
+                output_schema: spec_writing::spec_writing_schema(),
+            };
+
+            let stream_sender = sender.clone();
+            let outcome = client
+                .query_streaming::<SpecWritingResponse, _>(&request, |line| {
+                    let _ = stream_sender.send(AgentStreamMessage::StreamLine(line));
+                })
+                .map(AgentOutcome::SpecWriting)
+                .map_err(|err| err.to_string());
+
+            let _ = sender.send(AgentStreamMessage::Completed(AgentThreadResult {
+                client,
+                outcome,
+            }));
+        });
+    }
+
+    fn handle_spec_response(&mut self, response: SpecWritingResponse) {
+        self.ensure_journal();
+
+        match response.response_type {
+            SpecResponseType::SpecDraft => {
+                let draft = response.spec_draft.unwrap_or_default();
+
+                if let Some(journal) = &self.journal {
+                    let _ = journal.append_spec_draft(&draft);
+                }
+
+                self.add_system_message(&format!(
+                    "스펙 드래프트가 작성되었습니다:\n\n{}\n\n피드백을 입력하거나, Ctrl+A를 눌러 승인하세요.",
+                    draft
+                ));
+                self.last_spec_draft = Some(draft);
+                self.input_mode = InputMode::SpecFeedback;
+            }
+            SpecResponseType::ClarifyingQuestions => {
+                let questions = response.clarifying_questions.unwrap_or_default();
+
+                if let Some(journal) = &self.journal {
+                    let _ = journal.append_clarifying_questions(&questions);
+                }
+
+                let mut message = String::from("스펙 작성을 위해 추가 정보가 필요합니다.\n");
+                for (i, question) in questions.iter().enumerate() {
+                    message.push_str(&format!("\n{}. {}", i + 1, question));
+                }
+
+                self.spec_clarification_questions = questions;
+                self.add_system_message(&message);
+                self.input_mode = InputMode::SpecClarificationAnswer;
+            }
+        }
+    }
+
+    fn ensure_journal(&mut self) {
+        if self.journal.is_some() {
+            return;
+        }
+
+        let workspace = match &self.confirmed_workspace {
+            Some(w) => w.clone(),
+            None => return,
+        };
+
+        let session_id = self
+            .claude_client
+            .as_ref()
+            .and_then(|c| c.session_id())
+            .unwrap_or("unknown")
+            .to_string();
+
+        match SpecJournal::new(&workspace, &session_id) {
+            Ok(journal) => {
+                // Phase 1 데이터를 소급 기록한다.
+                if let Some(request) = &self.confirmed_requirements {
+                    let _ = journal.append_user_request(request);
+                }
+                let _ = journal.append_qa_log(&self.qa_log);
+
+                self.journal = Some(journal);
+            }
+            Err(err) => {
+                self.add_system_message(&format!("저널 파일 생성 실패: {}", err));
+            }
+        }
+    }
+
+    fn submit_spec_clarification_answer(&mut self) {
+        let answer = self.input_buffer.trim().to_string();
+        if answer.is_empty() {
+            return;
+        }
+
+        self.add_user_message(&answer);
+        self.clear_input();
+
+        if let Some(journal) = &self.journal {
+            let _ = journal.append_user_answers(&answer);
+        }
+
+        self.add_system_message("답변을 반영하여 스펙을 작성합니다.");
+        self.start_spec_writing_query(false);
+    }
+
+    fn submit_spec_feedback(&mut self) {
+        let feedback = self.input_buffer.trim().to_string();
+        if feedback.is_empty() {
+            return;
+        }
+
+        self.add_user_message(&feedback);
+        self.clear_input();
+
+        if let Some(journal) = &self.journal {
+            let _ = journal.append_user_feedback(&feedback);
+        }
+
+        self.add_system_message("피드백을 반영하여 스펙을 수정합니다.");
+        self.start_spec_writing_query(false);
+    }
+
+    fn approve_spec(&mut self) {
+        if let Some(spec) = &self.last_spec_draft {
+            if let Some(journal) = &self.journal {
+                let _ = journal.append_approved_spec(spec);
+            }
+            self.add_system_message("스펙이 승인되었습니다.");
+        } else {
+            self.add_system_message("승인할 스펙이 없습니다.");
+        }
         self.input_mode = InputMode::Done;
     }
 

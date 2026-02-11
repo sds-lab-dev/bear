@@ -25,17 +25,17 @@ You are generating a HANDOFF DOCUMENT for the next task. The goal is to reset th
 6) Clearly separate: facts vs decisions vs recommendations. Recommendations must be explicitly labeled and must include the rationale.
 
 ## Output path of the handoff document
-- Write the document to: `<WORKSPACE_ROOT>/.HANDOFF-<SUBJECT>.md`
+- Write the document to: `<WORKSPACE_ROOT>/.handoff/<SUBJECT>.md`
     - where:
       - `<WORKSPACE_ROOT>`: absolute path of the workspace directory.
       - `<SUBJECT>`: short subject for the current task that should be consist of only alphanumeric, `-`, and `_` characters.
   Example:
-    - `/workspace/.HANDOFF-tui-skeleton.md`
-    - `/workspace/.HANDOFF-fix-broken-api.md`
+    - `/workspace/.handoff/tui-skeleton.md`
+    - `/workspace/.handoff/fix-broken-api.md`
 - If the path already exists, create a new file by appending `-v2`, `-v3`, etc.
   Example:
-    - If `/workspace/.HANDOFF-tui-skeleton.md` exists, create `/workspace/.HANDOFF-tui-skeleton-v2.md`
-    - If `/workspace/.HANDOFF-tui-skeleton-v2.md` also exists, create `/workspace/.HANDOFF-tui-skeleton-v3.md`
+    - If `/workspace/.handoff/tui-skeleton.md` exists, create `/workspace/.handoff/tui-skeleton-v2.md`
+    - If `/workspace/.handoff/tui-skeleton-v2.md` also exists, create `/workspace/.handoff/tui-skeleton-v3.md`
     - Continue this pattern until you find a non-existing file name.
 - Do NOT overwrite existing handoff documents EVER.
 

@@ -3,6 +3,7 @@ mod clarification;
 mod error;
 mod event;
 mod renderer;
+mod spec_writing;
 
 pub use error::UiError;
 
