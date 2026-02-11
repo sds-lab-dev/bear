@@ -10,8 +10,9 @@
             "group": "build",
             "label": "Build",
             "presentation": {
-                "panel": "dedicated",
-                "clear": true
+                "panel": "shared",
+                "clear": false,
+                "close": false
             },
             "options": {
                 "shell": {
@@ -34,8 +35,9 @@
             "group": "build",
             "label": "Run",
             "presentation": {
-                "panel": "dedicated",
-                "clear": true
+                "panel": "shared",
+                "clear": false,
+                "close": false
             },
             "options": {
                 "shell": {
@@ -58,8 +60,9 @@
             "group": "build",
             "label": "Check",
             "presentation": {
-                "panel": "dedicated",
-                "clear": true
+                "panel": "shared",
+                "clear": false,
+                "close": false
             },
             "options": {
                 "shell": {
