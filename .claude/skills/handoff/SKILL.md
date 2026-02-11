@@ -119,6 +119,15 @@ Commit range attributable to this session (most recent first):
 - 8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b: Add regression test for missing CONFIG_PATH
 ```
 
+## Unfinished Work / Continuation Plan
+Use this section when the task was NOT completed (either partially done, blocked, or paused). If the task is fully completed, write `NONE`.
+
+Include if the task is incomplete:
+- Remaining work items (must be concrete, ordered, and checkable).
+- How to continue safely (exact next commands / files / entry points).
+- What is currently blocked and why, with the minimum info needed to unblock.
+- Guardrails and pitfalls to avoid (things that could silently regress behavior or waste time).
+
 ---
 
 Now generate the handoff document using the template and write it to the handoff document path.
