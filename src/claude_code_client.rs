@@ -6,7 +6,8 @@ pub use error::ClaudeCodeClientError;
 pub use response::CliResponse;
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::io::BufRead;
+use std::process::{Command, Stdio};
 
 use serde::de::DeserializeOwned;
 
@@ -95,10 +96,7 @@ impl ClaudeCodeClient {
         })
     }
 
-    pub fn query<T: DeserializeOwned>(
-        &mut self,
-        request: &ClaudeCodeRequest,
-    ) -> Result<T, ClaudeCodeClientError> {
+    fn build_base_command(&self, request: &ClaudeCodeRequest) -> (Command, Option<String>) {
         let model_effort_level = "high";
         let disable_auto_memory = "0";  // 0 = force enable.
         let disable_feedback_survey = "1";
@@ -110,7 +108,6 @@ impl ClaudeCodeClient {
             .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", disable_auto_memory)
             .env("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", disable_feedback_survey)
             .arg("-p")
-            .arg("--output-format").arg("json")
             .arg("--allow-dangerously-skip-permissions")
             .arg("--permission-mode").arg("bypassPermissions")
             .arg("--tools").arg("AskUserQuestion,Bash,TaskOutput,Edit,ExitPlanMode,Glob,Grep,KillShell,MCPSearch,Read,Skill,Task,TaskCreate,TaskGet,TaskList,TaskUpdate,WebFetch,WebSearch,Write,LSP");
@@ -145,6 +142,16 @@ impl ClaudeCodeClient {
 
         let output_schema_string = request.output_schema.to_string();
         command.arg("--json-schema").arg(&output_schema_string);
+
+        (command, new_session_id)
+    }
+
+    pub fn query<T: DeserializeOwned>(
+        &mut self,
+        request: &ClaudeCodeRequest,
+    ) -> Result<T, ClaudeCodeClientError> {
+        let (mut command, new_session_id) = self.build_base_command(request);
+        command.arg("--output-format").arg("json");
         command.arg(&request.user_prompt);
 
         let output = command.output().map_err(|err| {
@@ -174,6 +181,129 @@ impl ClaudeCodeClient {
 
         Ok(parsed.result)
     }
+
+    pub fn query_streaming<T, F>(
+        &mut self,
+        request: &ClaudeCodeRequest,
+        on_stream_message: F,
+    ) -> Result<T, ClaudeCodeClientError>
+    where
+        T: DeserializeOwned,
+        F: Fn(String),
+    {
+        let (mut command, new_session_id) = self.build_base_command(request);
+        command.arg("--output-format").arg("stream-json");
+        command.arg("--include-partial-messages");
+        command.arg(&request.user_prompt);
+
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| ClaudeCodeClientError::CommandExecutionFailed {
+                message: err.to_string(),
+            })?;
+
+        let stdout = child.stdout.take().expect("stdout must be piped");
+        let reader = std::io::BufReader::new(stdout);
+
+        // 파이프 버퍼 데드락 방지를 위해 stderr를 별도 스레드에서 읽는다.
+        let stderr = child.stderr.take().expect("stderr must be piped");
+        let stderr_thread = std::thread::spawn(move || {
+            let stderr_reader = std::io::BufReader::new(stderr);
+            stderr_reader.lines().map_while(Result::ok).collect::<Vec<_>>().join("\n")
+        });
+
+        let mut raw_lines: Vec<String> = Vec::new();
+        let mut result_value: Option<serde_json::Value> = None;
+        // result 직전의 assistant+user 메시지 쌍은 최종 결과와 중복되므로 버퍼링 후 스킵한다.
+        // 새 assistant 메시지가 도착할 때만 이전 버퍼를 플러시한다.
+        let mut pending_messages: Vec<String> = Vec::new();
+
+        for line_result in reader.lines() {
+            let line = line_result.map_err(|err| {
+                ClaudeCodeClientError::CommandExecutionFailed {
+                    message: format!("stdout 읽기 실패: {}", err),
+                }
+            })?;
+
+            raw_lines.push(line.clone());
+
+            let json: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+            match msg_type {
+                "assistant" => {
+                    for msg in pending_messages.drain(..) {
+                        on_stream_message(msg);
+                    }
+                    if let Some(formatted) = format_stream_message(&json) {
+                        pending_messages.push(formatted);
+                    }
+                }
+                "user" => {
+                    if let Some(formatted) = format_stream_message(&json) {
+                        pending_messages.push(formatted);
+                    }
+                }
+                "result" => {
+                    pending_messages.clear();
+                    result_value = Some(json);
+                }
+                _ => {}
+            }
+        }
+
+        let status = child.wait().map_err(|err| {
+            ClaudeCodeClientError::CommandExecutionFailed {
+                message: err.to_string(),
+            }
+        })?;
+
+        let stderr_content = stderr_thread.join().unwrap_or_default();
+
+        if !status.success() && result_value.is_none() {
+            let message = if stderr_content.is_empty() {
+                format!("프로세스 종료 코드: {}", status)
+            } else {
+                stderr_content
+            };
+            return Err(ClaudeCodeClientError::CommandExecutionFailed {
+                message,
+            });
+        }
+
+        let command_session_id = new_session_id
+            .as_deref()
+            .or(self.session_id.as_deref())
+            .unwrap_or("unknown");
+        let raw_output = raw_lines.join("\n");
+        write_debug_log(request, command_session_id, raw_output.as_bytes());
+
+        let result_json = result_value.ok_or(ClaudeCodeClientError::NoResultMessage)?;
+        let response: CliResponse = serde_json::from_value(result_json)?;
+
+        if response.is_error {
+            return Err(ClaudeCodeClientError::CliReturnedError {
+                message: response.result.unwrap_or_default(),
+            });
+        }
+
+        let output_value = response.structured_output
+            .ok_or(ClaudeCodeClientError::MissingStructuredOutput)?;
+        let result: T = serde_json::from_value(output_value)?;
+
+        if new_session_id.is_some() {
+            self.session_id = Some(response.session_id);
+        }
+
+        Ok(result)
+    }
 }
 
 fn write_debug_log(request: &ClaudeCodeRequest, session_id: &str, cli_stdout: &[u8]) {
@@ -190,6 +320,92 @@ fn write_debug_log(request: &ClaudeCodeRequest, session_id: &str, cli_stdout: &[
 
     // 디버그 로그 기록 실패는 무시한다.
     let _ = std::fs::write(&path, content);
+}
+
+const MAX_STREAM_DISPLAY_LINES: usize = 3;
+
+fn format_stream_message(json: &serde_json::Value) -> Option<String> {
+    let msg_type = json.get("type")?.as_str()?;
+    let formatted = match msg_type {
+        "assistant" => format_assistant_message(json),
+        "user" => format_user_message(json),
+        _ => None,
+    };
+    formatted.map(|text| truncate_to_max_lines(&text))
+}
+
+fn truncate_to_max_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= MAX_STREAM_DISPLAY_LINES {
+        return text.to_string();
+    }
+    let visible: String = lines[..MAX_STREAM_DISPLAY_LINES].join("\n");
+    let omitted = lines.len() - MAX_STREAM_DISPLAY_LINES;
+    format!("{}\n... (+{} lines)", visible, omitted)
+}
+
+fn format_assistant_message(json: &serde_json::Value) -> Option<String> {
+    let content = json.get("message")?.get("content")?.as_array()?;
+    let mut parts: Vec<String> = Vec::new();
+
+    for block in content {
+        let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match block_type {
+            "text" => {
+                if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        parts.push(trimmed.to_string());
+                    }
+                }
+            }
+            "tool_use" => {
+                let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let input = block.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                parts.push(format!("[Tool Call: {}]\n{}", name, input));
+            }
+            _ => {}
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+fn format_user_message(json: &serde_json::Value) -> Option<String> {
+    let content = json.get("message")?.get("content")?.as_array()?;
+    let mut parts: Vec<String> = Vec::new();
+
+    for item in content {
+        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match item_type {
+            "tool_result" => {
+                if let Some(text) = item.get("content").and_then(|v| v.as_str())
+                    && !text.is_empty()
+                {
+                    parts.push(format!("[Tool Result]\n{}", text));
+                }
+            }
+            "text" => {
+                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        parts.push(trimmed.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
 }
 
 #[cfg(test)]
@@ -335,5 +551,143 @@ mod tests {
             matches!(err, ClaudeCodeClientError::JsonParsingFailed { .. }),
             "expected JsonParsingFailed, got: {err}",
         );
+    }
+
+    #[test]
+    fn format_assistant_text_message() {
+        let json = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": "프로젝트를 분석하겠습니다."}]
+            }
+        });
+
+        let result = format_stream_message(&json).unwrap();
+
+        assert_eq!(result, "프로젝트를 분석하겠습니다.");
+    }
+
+    #[test]
+    fn format_assistant_tool_use_message() {
+        let json = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": {"command": "ls /workspace", "description": "List files"}
+                }]
+            }
+        });
+
+        let result = format_stream_message(&json).unwrap();
+
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines[0], "[Tool Call: Bash]");
+        assert!(lines[1].contains("ls /workspace"));
+    }
+
+    #[test]
+    fn format_user_tool_result_message() {
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_123",
+                    "content": "Cargo.toml\nsrc",
+                    "is_error": false
+                }]
+            }
+        });
+
+        let result = format_stream_message(&json).unwrap();
+
+        assert_eq!(result, "[Tool Result]\nCargo.toml\nsrc");
+    }
+
+    #[test]
+    fn format_stream_ignores_system_type() {
+        let json = serde_json::json!({"type": "system", "subtype": "init"});
+
+        assert!(format_stream_message(&json).is_none());
+    }
+
+    #[test]
+    fn format_stream_ignores_empty_text() {
+        let json = serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "  \n  "}]}
+        });
+
+        assert!(format_stream_message(&json).is_none());
+    }
+
+    #[test]
+    fn format_user_text_message() {
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [{"type": "text", "text": "Explore the project."}]
+            }
+        });
+
+        let result = format_stream_message(&json).unwrap();
+
+        assert_eq!(result, "Explore the project.");
+    }
+
+    #[test]
+    fn truncate_long_tool_result() {
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_123",
+                    "content": "line1\nline2\nline3\nline4\nline5",
+                    "is_error": false
+                }]
+            }
+        });
+
+        let result = format_stream_message(&json).unwrap();
+        let lines: Vec<&str> = result.lines().collect();
+
+        assert_eq!(lines[0], "[Tool Result]");
+        assert_eq!(lines[1], "line1");
+        assert_eq!(lines[2], "line2");
+        assert_eq!(lines[3], "... (+3 lines)");
+    }
+
+    #[test]
+    fn no_truncation_within_limit() {
+        let json = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": "line1\nline2\nline3"}]
+            }
+        });
+
+        let result = format_stream_message(&json).unwrap();
+
+        assert_eq!(result, "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn format_empty_tool_result_is_skipped() {
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_123",
+                    "content": "",
+                    "is_error": false
+                }]
+            }
+        });
+
+        assert!(format_stream_message(&json).is_none());
     }
 }

@@ -36,6 +36,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     lines.extend(build_banner_lines(area.width));
 
     app.terminal_width = area.width;
+    app.terminal_height = area.height;
 
     for message in &app.messages {
         lines.extend(format_message(message, area.width));
@@ -135,17 +136,25 @@ fn format_message(message: &ChatMessage, max_width: u16) -> Vec<Line<'static>> {
     let mut is_first = true;
 
     for text_line in message.content.lines() {
+        let line_style = if matches!(message.role, MessageRole::System)
+            && is_tool_label(text_line)
+        {
+            text_style.add_modifier(Modifier::BOLD)
+        } else {
+            text_style
+        };
+
         for visual_line in wrap_text_by_char_width(text_line, text_width) {
             if is_first {
                 lines.push(Line::from(vec![
                     Span::styled(prefix, prefix_style),
-                    Span::styled(visual_line, text_style),
+                    Span::styled(visual_line, line_style),
                 ]));
                 is_first = false;
             } else {
                 lines.push(Line::from(Span::styled(
                     format!("{}{}", padding, visual_line),
-                    text_style,
+                    line_style,
                 )));
             }
         }
@@ -294,6 +303,10 @@ pub(super) fn wrap_text_by_char_width(text: &str, max_width: usize) -> Vec<Strin
 
     result.push(current_line);
     result
+}
+
+fn is_tool_label(line: &str) -> bool {
+    line.starts_with("[Tool Call:") || line.starts_with("[Tool Result]")
 }
 
 fn wrap_words(text: &str, max_width: usize) -> Vec<String> {

@@ -35,12 +35,18 @@ struct AgentThreadResult {
     outcome: Result<ClarificationQuestions, String>,
 }
 
+enum AgentStreamMessage {
+    StreamLine(String),
+    Completed(AgentThreadResult),
+}
+
 pub struct App {
     pub messages: Vec<ChatMessage>,
     input_mode: InputMode,
     pub input_buffer: String,
     pub cursor_position: usize,
     pub terminal_width: u16,
+    pub terminal_height: u16,
     pub confirmed_workspace: Option<PathBuf>,
     pub confirmed_requirements: Option<String>,
     pub should_quit: bool,
@@ -51,7 +57,7 @@ pub struct App {
     keyboard_enhancement_enabled: bool,
     config: Config,
     claude_client: Option<ClaudeCodeClient>,
-    agent_result_receiver: Option<mpsc::Receiver<AgentThreadResult>>,
+    agent_result_receiver: Option<mpsc::Receiver<AgentStreamMessage>>,
     qa_log: Vec<QaRound>,
     current_round_questions: Vec<String>,
     thinking_started_at: Instant,
@@ -77,6 +83,7 @@ impl App {
             input_buffer: String::new(),
             cursor_position: 0,
             terminal_width: 80,
+            terminal_height: 24,
             confirmed_workspace: None,
             confirmed_requirements: None,
             should_quit: false,
@@ -154,27 +161,33 @@ impl App {
     }
 
     fn tick_agent_result(&mut self) {
-        let receiver = match &self.agent_result_receiver {
+        let receiver = match self.agent_result_receiver.take() {
             Some(r) => r,
             None => return,
         };
 
-        let result = match receiver.try_recv() {
-            Ok(r) => r,
-            Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.agent_result_receiver = None;
-                self.handle_agent_error("에이전트 통신이 중단되었습니다.".to_string());
-                return;
+        loop {
+            match receiver.try_recv() {
+                Ok(AgentStreamMessage::StreamLine(line)) => {
+                    self.add_system_message(&line);
+                }
+                Ok(AgentStreamMessage::Completed(result)) => {
+                    self.claude_client = Some(result.client);
+                    match result.outcome {
+                        Ok(response) => self.handle_clarification_response(response),
+                        Err(error_message) => self.handle_agent_error(error_message),
+                    }
+                    return;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    self.agent_result_receiver = Some(receiver);
+                    return;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.handle_agent_error("에이전트 통신이 중단되었습니다.".to_string());
+                    return;
+                }
             }
-        };
-
-        self.agent_result_receiver = None;
-        self.claude_client = Some(result.client);
-
-        match result.outcome {
-            Ok(response) => self.handle_clarification_response(response),
-            Err(error_message) => self.handle_agent_error(error_message),
         }
     }
 
@@ -184,11 +197,13 @@ impl App {
     }
 
     pub fn scroll_up(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_add(1);
+        let page_size = self.terminal_height.saturating_sub(2);
+        self.scroll_offset = self.scroll_offset.saturating_add(page_size);
     }
 
     pub fn scroll_down(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+        let page_size = self.terminal_height.saturating_sub(2);
+        self.scroll_offset = self.scroll_offset.saturating_sub(page_size);
     }
 
     pub fn set_keyboard_enhancement_enabled(&mut self, enabled: bool) {
@@ -383,11 +398,14 @@ impl App {
                 output_schema: clarification::clarification_schema(),
             };
 
+            let stream_sender = sender.clone();
             let outcome = client
-                .query::<ClarificationQuestions>(&request)
+                .query_streaming::<ClarificationQuestions, _>(&request, |line| {
+                    let _ = stream_sender.send(AgentStreamMessage::StreamLine(line));
+                })
                 .map_err(|err| err.to_string());
 
-            let _ = sender.send(AgentThreadResult { client, outcome });
+            let _ = sender.send(AgentStreamMessage::Completed(AgentThreadResult { client, outcome }));
         });
     }
 
