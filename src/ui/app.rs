@@ -8,7 +8,7 @@ use crate::claude_code_client::{ClaudeCodeClient, ClaudeCodeRequest};
 use crate::config::Config;
 use super::clarification::{self, ClarificationQuestions, QaRound};
 use super::error::UiError;
-use super::renderer::wrap_text_by_char_width;
+use super::renderer::{USER_PREFIX, wrap_text_by_char_width};
 
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -500,9 +500,8 @@ impl App {
     }
 
     fn compute_visual_lines(&self) -> Vec<VisualLineInfo> {
-        let prefix_len = 5; // "You> " or "     "
         let cursor_reserved = 1;
-        let text_width = (self.terminal_width as usize).saturating_sub(prefix_len + cursor_reserved);
+        let text_width = (self.terminal_width as usize).saturating_sub(USER_PREFIX.len() + cursor_reserved);
 
         let logical_lines: Vec<&str> = self.input_buffer.split('\n').collect();
         let mut result = Vec::new();

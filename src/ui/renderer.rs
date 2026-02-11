@@ -6,6 +6,9 @@ use unicode_width::UnicodeWidthChar;
 
 use super::app::{App, ChatMessage, MessageRole};
 
+pub const SYSTEM_PREFIX: &str = "Bear> ";
+pub const USER_PREFIX: &str = " You> ";
+
 const BEAR_TEXTS: [&str; 7] = [
     "",
     "       () _ _ ()",
@@ -54,7 +57,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             .add_modifier(Modifier::BOLD);
         let thinking_style = Style::default().fg(Color::Yellow);
         lines.push(Line::from(vec![
-            Span::styled("Bear> ", system_prefix_style),
+            Span::styled(SYSTEM_PREFIX, system_prefix_style),
             Span::styled(app.thinking_indicator().to_string(), thinking_style),
         ]));
     } else {
@@ -123,44 +126,27 @@ fn format_message(message: &ChatMessage, max_width: u16) -> Vec<Line<'static>> {
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    match message.role {
-        MessageRole::System => {
-            let text_width = (max_width as usize).saturating_sub(6); // "Bear> " = 6
-            let mut is_first = true;
+    let (prefix, prefix_style, text_style) = match message.role {
+        MessageRole::System => (SYSTEM_PREFIX, system_prefix_style, Style::default()),
+        MessageRole::User => (USER_PREFIX, user_prefix_style, user_text_style),
+    };
+    let padding = " ".repeat(prefix.len());
+    let text_width = (max_width as usize).saturating_sub(prefix.len());
+    let mut is_first = true;
 
-            for text_line in message.content.lines() {
-                for visual_line in wrap_text_by_char_width(text_line, text_width) {
-                    if is_first {
-                        lines.push(Line::from(vec![
-                            Span::styled("Bear> ", system_prefix_style),
-                            Span::styled(visual_line, Style::default()),
-                        ]));
-                        is_first = false;
-                    } else {
-                        lines.push(Line::from(format!("      {}", visual_line)));
-                    }
-                }
-            }
-        }
-        MessageRole::User => {
-            let text_width = (max_width as usize).saturating_sub(5); // "You> " = 5
-            let mut is_first = true;
-
-            for text_line in message.content.lines() {
-                for visual_line in wrap_text_by_char_width(text_line, text_width) {
-                    if is_first {
-                        lines.push(Line::from(vec![
-                            Span::styled("You> ", user_prefix_style),
-                            Span::styled(visual_line, user_text_style),
-                        ]));
-                        is_first = false;
-                    } else {
-                        lines.push(Line::from(Span::styled(
-                            format!("     {}", visual_line),
-                            user_text_style,
-                        )));
-                    }
-                }
+    for text_line in message.content.lines() {
+        for visual_line in wrap_text_by_char_width(text_line, text_width) {
+            if is_first {
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, prefix_style),
+                    Span::styled(visual_line, text_style),
+                ]));
+                is_first = false;
+            } else {
+                lines.push(Line::from(Span::styled(
+                    format!("{}{}", padding, visual_line),
+                    text_style,
+                )));
             }
         }
     }
@@ -201,9 +187,8 @@ fn build_input_lines<'a>(
     text_style: Style,
     max_width: u16,
 ) -> Vec<Line<'a>> {
-    let prefix_len = 5; // "You> " or "     "
     let cursor_reserved = 1;
-    let text_width = (max_width as usize).saturating_sub(prefix_len + cursor_reserved);
+    let text_width = (max_width as usize).saturating_sub(USER_PREFIX.len() + cursor_reserved);
 
     let mut lines = Vec::new();
     let logical_lines: Vec<&str> = input_buffer.split('\n').collect();
@@ -228,14 +213,19 @@ fn build_input_lines<'a>(
                 is_last_visual_of_logical,
             );
 
-            let prefix = if is_first_visual_line { "You> " } else { "     " };
+            let padding = " ".repeat(USER_PREFIX.len());
+            let prefix = if is_first_visual_line {
+                USER_PREFIX.to_string()
+            } else {
+                padding.clone()
+            };
             let current_prefix_style = if is_first_visual_line {
                 prefix_style
             } else {
                 Style::default()
             };
 
-            let mut spans = vec![Span::styled(prefix.to_string(), current_prefix_style)];
+            let mut spans = vec![Span::styled(prefix, current_prefix_style)];
 
             if let Some(col) = cursor_col {
                 let before: String = visual_text.chars().take(col).collect();
