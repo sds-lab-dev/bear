@@ -8,6 +8,7 @@ use crate::claude_code_client::{ClaudeCodeClient, ClaudeCodeRequest};
 use crate::config::Config;
 use super::clarification::{self, ClarificationQuestions, QaRound};
 use super::planning::{self, PlanJournal, PlanResponseType, PlanWritingResponse};
+use super::session_naming::{self, SessionNameResponse};
 use super::spec_writing::{self, SpecJournal, SpecResponseType, SpecWritingResponse};
 use super::error::UiError;
 use super::renderer::{USER_PREFIX, wrap_text_by_char_width};
@@ -48,6 +49,7 @@ struct AgentThreadResult {
 }
 
 enum AgentStreamMessage {
+    SessionName(String),
     StreamLine(String),
     Completed(AgentThreadResult),
 }
@@ -80,6 +82,7 @@ pub struct App {
     last_plan_draft: Option<String>,
     plan_clarification_questions: Vec<String>,
     approved_spec: Option<String>,
+    session_name: Option<String>,
 }
 
 impl App {
@@ -124,6 +127,7 @@ impl App {
             last_plan_draft: None,
             plan_clarification_questions: Vec::new(),
             approved_spec: None,
+            session_name: None,
         })
     }
 
@@ -223,6 +227,9 @@ impl App {
 
         loop {
             match receiver.try_recv() {
+                Ok(AgentStreamMessage::SessionName(name)) => {
+                    self.session_name = Some(name);
+                }
                 Ok(AgentStreamMessage::StreamLine(line)) => {
                     self.add_system_message(&line);
                 }
@@ -463,6 +470,7 @@ impl App {
         let mut client = self.claude_client.take().expect("client must be available");
         let original_request = self.confirmed_requirements.clone().unwrap();
         let qa_log = self.qa_log.clone();
+        let needs_session_name = self.session_name.is_none();
 
         let (sender, receiver) = mpsc::channel();
         self.agent_result_receiver = Some(receiver);
@@ -470,6 +478,12 @@ impl App {
         self.thinking_started_at = Instant::now();
 
         std::thread::spawn(move || {
+            if needs_session_name {
+                let name = generate_session_name(&mut client, &original_request);
+                client.reset_session();
+                let _ = sender.send(AgentStreamMessage::SessionName(name));
+            }
+
             let request = ClaudeCodeRequest {
                 system_prompt: Some(clarification::system_prompt().to_string()),
                 user_prompt: clarification::build_user_prompt(&original_request, &qa_log),
@@ -614,14 +628,12 @@ impl App {
             None => return,
         };
 
-        let session_id = self
-            .claude_client
-            .as_ref()
-            .and_then(|c| c.session_id())
-            .unwrap_or("unknown")
-            .to_string();
+        let session_name = match &self.session_name {
+            Some(name) => name.clone(),
+            None => return,
+        };
 
-        match SpecJournal::new(&workspace, &session_id) {
+        match SpecJournal::new(&workspace, &session_name) {
             Ok(journal) => {
                 // Phase 1 데이터를 소급 기록한다.
                 if let Some(request) = &self.confirmed_requirements {
@@ -791,14 +803,19 @@ impl App {
             None => return,
         };
 
-        let session_id = self
+        let session_name = match &self.session_name {
+            Some(name) => name.clone(),
+            None => return,
+        };
+
+        let cli_session_id = self
             .claude_client
             .as_ref()
             .and_then(|c| c.session_id())
             .unwrap_or("unknown")
             .to_string();
 
-        match PlanJournal::new(&workspace, &session_id) {
+        match PlanJournal::new(&workspace, &session_name, &cli_session_id) {
             Ok(journal) => {
                 // 승인된 스펙을 plan journal에 소급 기록한다.
                 if let Some(spec) = &self.approved_spec {
@@ -1029,6 +1046,20 @@ fn find_cursor_visual_position(
 
     let last = visual_lines.len().saturating_sub(1);
     (last, visual_lines.get(last).map_or(0, |vl| vl.char_count))
+}
+
+fn generate_session_name(client: &mut ClaudeCodeClient, requirements: &str) -> String {
+    let request = ClaudeCodeRequest {
+        system_prompt: None,
+        user_prompt: session_naming::build_session_name_prompt(requirements),
+        model: None,
+        output_schema: session_naming::session_name_schema(),
+    };
+
+    match client.query::<SessionNameResponse>(&request) {
+        Ok(response) => session_naming::sanitize_session_name(&response.session_name),
+        Err(_) => "unnamed-session".to_string(),
+    }
 }
 
 /// 워크스페이스 경로 검증. 문제가 있으면 에러 메시지를, 없으면 None을 반환.

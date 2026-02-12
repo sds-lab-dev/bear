@@ -134,8 +134,8 @@ pub struct SpecJournal {
 }
 
 impl SpecJournal {
-    pub fn new(workspace: &Path, session_id: &str) -> io::Result<Self> {
-        let dir = workspace.join(".bear").join(session_id);
+    pub fn new(workspace: &Path, session_name: &str) -> io::Result<Self> {
+        let dir = workspace.join(".bear").join(session_name);
         fs::create_dir_all(&dir)?;
 
         let file_path = dir.join("spec.journal.md");

@@ -4,6 +4,7 @@ mod error;
 mod event;
 mod renderer;
 mod planning;
+mod session_naming;
 mod spec_writing;
 
 pub use error::UiError;

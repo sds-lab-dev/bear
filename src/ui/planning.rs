@@ -482,15 +482,15 @@ pub struct PlanJournal {
 }
 
 impl PlanJournal {
-    pub fn new(workspace: &Path, session_id: &str) -> io::Result<Self> {
-        let dir = workspace.join(".bear").join(session_id);
+    pub fn new(workspace: &Path, session_name: &str, cli_session_id: &str) -> io::Result<Self> {
+        let dir = workspace.join(".bear").join(session_name);
         fs::create_dir_all(&dir)?;
 
         let file_path = dir.join("plan.journal.md");
 
         Ok(Self {
             file_path,
-            session_id: session_id.to_string(),
+            session_id: cli_session_id.to_string(),
         })
     }
 
@@ -608,7 +608,7 @@ mod tests {
         let prompt = build_initial_plan_prompt("# Approved Spec\nBuild a CLI tool");
 
         assert!(prompt.contains("# Approved Spec\nBuild a CLI tool"));
-        assert!(prompt.contains("Planning process"));
+        assert!(prompt.contains("Planning Process"));
     }
 
     #[test]
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn plan_journal_creates_directory_and_file() {
         let temp_dir = TempDir::new().unwrap();
-        let journal = PlanJournal::new(temp_dir.path(), "test-session-123").unwrap();
+        let journal = PlanJournal::new(temp_dir.path(), "test-session", "cli-sess-001").unwrap();
 
         journal.append_approved_spec("# Spec Content").unwrap();
 
@@ -636,7 +636,7 @@ mod tests {
     #[test]
     fn plan_journal_appends_multiple_entries() {
         let temp_dir = TempDir::new().unwrap();
-        let journal = PlanJournal::new(temp_dir.path(), "test-session").unwrap();
+        let journal = PlanJournal::new(temp_dir.path(), "test-session", "cli-sess-002").unwrap();
 
         journal.append_approved_spec("# Spec").unwrap();
         journal.append_plan_draft("# Draft Plan").unwrap();
@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn plan_journal_file_path_structure() {
         let temp_dir = TempDir::new().unwrap();
-        let journal = PlanJournal::new(temp_dir.path(), "abc-123").unwrap();
+        let journal = PlanJournal::new(temp_dir.path(), "abc-123", "cli-sess-003").unwrap();
 
         let expected = temp_dir
             .path()
@@ -676,10 +676,10 @@ mod tests {
     }
 
     #[test]
-    fn plan_journal_entries_have_session_id_delimiter() {
+    fn plan_journal_entries_have_cli_session_id_delimiter() {
         let temp_dir = TempDir::new().unwrap();
-        let session_id = "my-session-id-456";
-        let journal = PlanJournal::new(temp_dir.path(), session_id).unwrap();
+        let cli_session_id = "my-cli-session-id-456";
+        let journal = PlanJournal::new(temp_dir.path(), "my-session", cli_session_id).unwrap();
 
         journal.append_approved_spec("spec content").unwrap();
         journal.append_plan_draft("plan content").unwrap();
@@ -687,16 +687,16 @@ mod tests {
         let content = fs::read_to_string(journal.file_path()).unwrap();
         let lines: Vec<&str> = content.lines().collect();
 
-        // 첫 번째 블록: session_id 구분자 → <APPROVED_SPEC>
-        assert_eq!(lines[0], session_id);
+        // 첫 번째 블록: cli_session_id 구분자 → <APPROVED_SPEC>
+        assert_eq!(lines[0], cli_session_id);
         assert_eq!(lines[1], "<APPROVED_SPEC>");
 
-        // 두 번째 블록도 session_id 구분자로 시작
+        // 두 번째 블록도 cli_session_id 구분자로 시작
         let second_delimiter_index = lines
             .iter()
             .enumerate()
             .skip(1)
-            .find(|(_, line)| **line == session_id)
+            .find(|(_, line)| **line == cli_session_id)
             .map(|(i, _)| i)
             .expect("second delimiter should exist");
         assert_eq!(lines[second_delimiter_index + 1], "<PLAN_DRAFT>");
@@ -705,8 +705,7 @@ mod tests {
     #[test]
     fn plan_journal_approved_plan_has_no_delimiter() {
         let temp_dir = TempDir::new().unwrap();
-        let session_id = "my-session-id-789";
-        let journal = PlanJournal::new(temp_dir.path(), session_id).unwrap();
+        let journal = PlanJournal::new(temp_dir.path(), "my-session", "cli-sess-789").unwrap();
 
         journal.append_approved_plan("final plan").unwrap();
 
