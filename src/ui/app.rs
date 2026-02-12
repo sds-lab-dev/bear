@@ -471,6 +471,7 @@ impl App {
         let original_request = self.confirmed_requirements.clone().unwrap();
         let qa_log = self.qa_log.clone();
         let needs_session_name = self.session_name.is_none();
+        let workspace = self.confirmed_workspace.clone().unwrap();
 
         let (sender, receiver) = mpsc::channel();
         self.agent_result_receiver = Some(receiver);
@@ -480,6 +481,7 @@ impl App {
         std::thread::spawn(move || {
             if needs_session_name {
                 let name = generate_session_name(&mut client, &original_request);
+                let name = session_naming::ensure_unique_name(&workspace, &name);
                 client.reset_session();
                 let _ = sender.send(AgentStreamMessage::SessionName(name));
             }

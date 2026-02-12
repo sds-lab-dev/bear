@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -78,6 +80,25 @@ pub fn sanitize_session_name(raw: &str) -> String {
     }
 }
 
+/// 워크스페이스의 `.bear/` 디렉토리 안에 동일한 이름이 이미 존재하면
+/// `-2`, `-3`, ... 접미사를 붙여 고유한 이름을 반환한다.
+pub fn ensure_unique_name(workspace: &Path, base_name: &str) -> String {
+    let bear_dir = workspace.join(".bear");
+
+    if !bear_dir.join(base_name).exists() {
+        return base_name.to_string();
+    }
+
+    for suffix in 2.. {
+        let candidate = format!("{}-{}", base_name, suffix);
+        if !bear_dir.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+
+    unreachable!()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +171,28 @@ mod tests {
     #[test]
     fn sanitize_preserves_digits() {
         assert_eq!(sanitize_session_name("v2-api-update"), "v2-api-update");
+    }
+
+    #[test]
+    fn unique_name_when_no_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(ensure_unique_name(tmp.path(), "my-session"), "my-session");
+    }
+
+    #[test]
+    fn unique_name_appends_suffix_on_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".bear/my-session")).unwrap();
+        assert_eq!(ensure_unique_name(tmp.path(), "my-session"), "my-session-2");
+    }
+
+    #[test]
+    fn unique_name_skips_existing_suffixes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bear = tmp.path().join(".bear");
+        std::fs::create_dir_all(bear.join("my-session")).unwrap();
+        std::fs::create_dir_all(bear.join("my-session-2")).unwrap();
+        std::fs::create_dir_all(bear.join("my-session-3")).unwrap();
+        assert_eq!(ensure_unique_name(tmp.path(), "my-session"), "my-session-4");
     }
 }
