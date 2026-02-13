@@ -193,11 +193,12 @@ impl SpecJournal {
             .append(true)
             .open(&self.file_path)?;
 
-        writeln!(file, "<<<BEGIN")?;
+        let id = uuid::Uuid::new_v4();
+        writeln!(file, "<<<BEGIN-{}", id)?;
         writeln!(file, "<{}>", tag)?;
         writeln!(file, "{}", content)?;
         writeln!(file, "</{}>", tag)?;
-        writeln!(file, ">>>END")?;
+        writeln!(file, ">>>END-{}", id)?;
 
         Ok(())
     }

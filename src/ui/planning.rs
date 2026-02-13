@@ -537,11 +537,12 @@ impl PlanJournal {
             .append(true)
             .open(&self.file_path)?;
 
-        writeln!(file, "<<<BEGIN")?;
+        let id = uuid::Uuid::new_v4();
+        writeln!(file, "<<<BEGIN-{}", id)?;
         writeln!(file, "<{}>", tag)?;
         writeln!(file, "{}", content)?;
         writeln!(file, "</{}>", tag)?;
-        writeln!(file, ">>>END")?;
+        writeln!(file, ">>>END-{}", id)?;
 
         Ok(())
     }
@@ -713,17 +714,29 @@ mod tests {
         let content = fs::read_to_string(journal.file_path()).unwrap();
         let lines: Vec<&str> = content.lines().collect();
 
-        assert_eq!(lines[0], "<<<BEGIN");
+        assert!(lines[0].starts_with("<<<BEGIN-"));
         assert_eq!(lines[1], "<APPROVED_SPEC>");
         assert_eq!(lines[2], "spec content");
         assert_eq!(lines[3], "</APPROVED_SPEC>");
-        assert_eq!(lines[4], ">>>END");
+        assert!(lines[4].starts_with(">>>END-"));
 
-        assert_eq!(lines[5], "<<<BEGIN");
+        assert!(lines[5].starts_with("<<<BEGIN-"));
         assert_eq!(lines[6], "<PLAN_DRAFT>");
         assert_eq!(lines[7], "plan content");
         assert_eq!(lines[8], "</PLAN_DRAFT>");
-        assert_eq!(lines[9], ">>>END");
+        assert!(lines[9].starts_with(">>>END-"));
+
+        // BEGIN과 END의 UUID가 동일한지 확인
+        let first_id = lines[0].strip_prefix("<<<BEGIN-").unwrap();
+        let first_end_id = lines[4].strip_prefix(">>>END-").unwrap();
+        assert_eq!(first_id, first_end_id);
+
+        let second_id = lines[5].strip_prefix("<<<BEGIN-").unwrap();
+        let second_end_id = lines[9].strip_prefix(">>>END-").unwrap();
+        assert_eq!(second_id, second_end_id);
+
+        // 서로 다른 블록은 서로 다른 UUID를 가져야 함
+        assert_ne!(first_id, second_id);
     }
 
     #[test]
@@ -737,10 +750,14 @@ mod tests {
         let content = fs::read_to_string(journal.file_path()).unwrap();
         let lines: Vec<&str> = content.lines().collect();
 
-        assert_eq!(lines[0], "<<<BEGIN");
+        assert!(lines[0].starts_with("<<<BEGIN-"));
         assert_eq!(lines[1], "<APPROVED_PLAN>");
         assert_eq!(lines[2], "final plan");
         assert_eq!(lines[3], "</APPROVED_PLAN>");
-        assert_eq!(lines[4], ">>>END");
+        assert!(lines[4].starts_with(">>>END-"));
+
+        let begin_id = lines[0].strip_prefix("<<<BEGIN-").unwrap();
+        let end_id = lines[4].strip_prefix(">>>END-").unwrap();
+        assert_eq!(begin_id, end_id);
     }
 }
