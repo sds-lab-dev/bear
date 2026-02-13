@@ -63,6 +63,53 @@ IMPORTANT:
 - Inspect the workspace using available tools to understand existing code context.
 - Write the spec in Korean.
 
+---
+
+DECISION ESCALATION (mandatory — read this BEFORE writing any draft):
+
+The spec describes WHAT the system must do, not HOW it is implemented. Therefore, decision escalation in this phase is limited to user-facing behavior and external contracts. Do NOT ask about internal implementation details (library choices, architecture patterns, database engines, threading models, etc.) — those decisions belong to the planning phase.
+
+You MUST NOT make decisions on behalf of the user for the following spec-level topics. If the user's requirements or the Q&A log do not explicitly address a decision listed below, you MUST set response_type to "clarifying_questions" and ask the user to decide — even if you believe you have enough information to write the spec otherwise.
+
+Decisions that REQUIRE user approval (never decide on your own):
+- External interface contract: what kind of interface the system exposes to users or consumers (e.g., CLI vs web UI vs desktop app, REST API vs GraphQL endpoint), since this fundamentally shapes what the spec describes.
+- UI/UX behavior: screen layout, navigation flow, interaction patterns, or visual design direction — these define what the user experiences and must be specified, not assumed.
+- User-facing authentication / authorization flow: how users authenticate from their perspective (e.g., login with password vs SSO vs API key), since this is observable behavior.
+- Breaking changes to existing public interfaces, APIs, or contracts that external consumers depend on.
+- Significant trade-offs that affect observable system behavior: consistency vs availability, real-time vs batch processing, online vs offline capability, etc.
+- Scope-affecting platform or environment constraints: whether the system must support specific platforms (e.g., Linux-only vs cross-platform), since this shapes the spec's non-functional requirements.
+
+Decisions you MAY make on your own (no need to ask):
+- Document structure and formatting of the spec itself.
+- Wording and categorization of requirements (functional vs non-functional).
+- Obvious choices that are already constrained by the existing codebase or prior user statements.
+
+Decisions you MUST NOT ask about (these belong to the planning phase, not the spec):
+- Specific library or framework selection (e.g., which TUI library, which HTTP client).
+- Internal architecture patterns (e.g., monolith vs microservice, event-driven vs request-response).
+- Data storage engine or persistence mechanism (e.g., PostgreSQL vs SQLite, file format).
+- Concurrency / threading model.
+- Deployment strategy or runtime environment details.
+- Specific external dependencies to add.
+
+How to ask the user for a decision:
+When you identify a spec-level decision that requires user approval, include it in your clarifying_questions. Each question MUST:
+1. Clearly state what needs to be decided and why it matters for the spec.
+2. Present 2–4 concrete options, each with a brief description of pros and cons.
+3. Include your recommendation and its rationale, so the user can make an informed choice quickly.
+4. Be written so the user can answer with a short phrase (e.g., "Option B" or "웹 UI").
+
+Example of a well-formed decision question:
+"시스템의 사용자 인터페이스 유형을 결정해야 합니다. 선택지: (A) TUI (터미널 UI) — 터미널 환경에서 직접 사용 가능, 가볍고 빠름, 그래픽 요소 제한적. (B) 웹 UI — 브라우저 기반으로 접근성 높음, 풍부한 시각 요소, 서버 구성 필요. (C) CLI — 가장 단순하고 스크립팅에 유리, 인터랙티브 경험은 제한적. 추천: (A) TUI — 개발 도구 특성상 터미널 환경이 자연스럽고, 서버 없이 로컬에서 바로 실행 가능합니다. 어떤 것을 사용할까요?"
+
+Handling user follow-up questions on decisions:
+The user may not immediately decide. Instead, they may ask counter-questions to learn more before deciding (e.g., "웹 UI랑 TUI의 차이가 정확히 뭐야?"). When this happens:
+- Answer the user's question thoroughly with enough detail for an informed decision.
+- Re-present the decision options (updated if the user's question reveals new considerations) with pros/cons and your recommendation.
+- Continue this cycle until the user makes a clear decision. Multiple rounds of follow-up questions are expected and must be supported.
+
+---
+
 Output MUST be valid JSON conforming to the provided JSON Schema.
 Output MUST contain ONLY the JSON object, with no extra text.
 
@@ -86,6 +133,19 @@ IMPORTANT:
 - The spec MUST be testable with clear acceptance criteria.
 - Write the spec in Korean.
 - Read the spec journal file at the path below to understand the full context of prior requirements, Q&A, and previous spec drafts.
+- DECISION ESCALATION: The same decision-escalation rules from the initial spec phase still apply. If the user's feedback introduces or reveals new undecided spec-level topics that require user approval (external interface contract, UI/UX behavior, user-facing auth flow, breaking changes to public contracts, observable behavior trade-offs, platform constraints), you MUST set response_type to "clarifying_questions" and ask the user to decide before revising the spec. When asking, present options with pros/cons and your recommendation. Do NOT silently incorporate your own choices into the revised spec. Remember: do NOT ask about implementation details (library choices, architecture patterns, storage engines, etc.) — those belong to the planning phase.
+- USER RESPONSE CLASSIFICATION: When the spec journal shows that the most recent model output was a set of clarifying questions (a CLARIFYING_QUESTIONS entry, especially decision-escalation questions), you MUST classify the user's current message into one of three categories before taking any other action:
+
+  (1) DECISION / ANSWER: The user clearly provides a decision or directly answers the pending question(s).
+  → Incorporate the decision and proceed normally — write or revise the spec.
+
+  (2) COUNTER-QUESTION: The user is asking for more information, explanation, or clarification before deciding (e.g., "웹 UI랑 TUI의 차이가 정확히 뭐야?", "SSO를 적용하면 어떤 제약이 생겨?", "각 옵션의 유지보수 비용 차이는?").
+  → Set response_type to "clarifying_questions". Provide a thorough, informative answer to the user's question with enough context for them to make an informed decision. Then re-present the original decision options (updated if the user's question reveals new considerations) with pros/cons and your recommendation. The user must still make the final decision.
+
+  (3) UNCLEAR INTENT: The user's response does not clearly fit category (1) or (2) — you cannot determine whether they made a decision, asked a question, or want something else.
+  → Set response_type to "clarifying_questions". Politely acknowledge the user's message, briefly restate the pending decision, and ask them to either: (a) choose one of the presented options, (b) ask any questions they have about the options, or (c) explain what they would like to do.
+
+  IMPORTANT: This classification applies every time the user responds after a clarifying-question round. The user may go through multiple rounds of counter-questions before making a final decision. You MUST support this without losing track of any pending decision(s). Always check the journal for the full history of questions and answers.
 - APPROVAL DETECTION: Before attempting any revision, first evaluate whether the user's feedback message is expressing approval or acceptance of the current draft rather than requesting changes. Examples of approval expressions include (but are not limited to): "승인합니다", "좋습니다", "진행해주세요", "괜찮습니다", "이대로 해주세요", "OK", "LGTM", "approve", "looks good". If the user's message UNAMBIGUOUSLY expresses approval with NO revision requests whatsoever, set response_type to "approved" and leave all other fields empty. If the message contains ANY specific change request, suggestion, or criticism — even if it also contains positive language (e.g., "좋은데 한 가지만 수정해주세요") — treat it as feedback and revise normally. When in doubt, treat the message as feedback requiring revision, NOT as approval.
 
 Output MUST be valid JSON conforming to the provided JSON Schema.
@@ -107,6 +167,16 @@ Spec journal file format:
 <USER_REQUEST>
 ...original user request text verbatim...
 </USER_REQUEST>
+>>>END-<UUID_v4>
+<<<BEGIN-<UUID_v4>
+<CLARIFYING_QUESTIONS>
+...numbered list of clarifying questions from the model...
+</CLARIFYING_QUESTIONS>
+>>>END-<UUID_v4>
+<<<BEGIN-<UUID_v4>
+<USER_ANSWERS>
+...user's answer to the clarifying questions...
+</USER_ANSWERS>
 >>>END-<UUID_v4>
 <<<BEGIN-<UUID_v4>
 <SPEC_DRAFT>
@@ -132,7 +202,7 @@ where:
 
 `<USER_REQUEST>` and `<APPROVED_SPEC>` sections appear ONLY ONCE at the start and end of the journal.
 
-`<SPEC_DRAFT>` and `<USER_FEEDBACK>` sections MAY appear multiple times as the spec is revised and approved."#;
+`<SPEC_DRAFT>`, `<USER_FEEDBACK>`, `<CLARIFYING_QUESTIONS>`, and `<USER_ANSWERS>` sections MAY appear multiple times as the spec is refined through Q&A rounds and revisions."#;
 
 pub fn build_initial_spec_prompt(original_request: &str, qa_log: &[QaRound]) -> String {
     let qa_log_text = format_qa_log(qa_log);
