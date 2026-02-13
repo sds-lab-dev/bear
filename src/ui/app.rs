@@ -578,6 +578,9 @@ impl App {
                 self.add_system_message(&message);
                 self.input_mode = InputMode::SpecClarificationAnswer;
             }
+            SpecResponseType::Approved => {
+                self.approve_spec();
+            }
         }
     }
 
@@ -757,6 +760,9 @@ impl App {
                 self.plan_clarification_questions = questions;
                 self.add_system_message(&message);
                 self.input_mode = InputMode::PlanClarificationAnswer;
+            }
+            PlanResponseType::Approved => {
+                self.approve_plan();
             }
         }
     }

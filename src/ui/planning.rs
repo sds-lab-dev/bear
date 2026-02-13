@@ -16,6 +16,7 @@ pub struct PlanWritingResponse {
 pub enum PlanResponseType {
     PlanDraft,
     ClarifyingQuestions,
+    Approved,
 }
 
 pub fn plan_writing_schema() -> serde_json::Value {
@@ -24,7 +25,7 @@ pub fn plan_writing_schema() -> serde_json::Value {
         "properties": {
             "response_type": {
                 "type": "string",
-                "enum": ["plan_draft", "clarifying_questions"]
+                "enum": ["plan_draft", "clarifying_questions", "approved"]
             },
             "plan_draft": {
                 "type": "string"
@@ -421,6 +422,7 @@ If the user's feedback is ambiguous and you need clarification before revising, 
 IMPORTANT:
 - Read the plan journal file at the path below to understand the full context of prior specifications, plans, and feedback.
 - Write the plan in Korean.
+- APPROVAL DETECTION: Before attempting any revision, first evaluate whether the user's feedback message is expressing approval or acceptance of the current draft rather than requesting changes. Examples of approval expressions include (but are not limited to): "승인합니다", "좋습니다", "진행해주세요", "괜찮습니다", "이대로 해주세요", "OK", "LGTM", "approve", "looks good". If the user's message UNAMBIGUOUSLY expresses approval with NO revision requests whatsoever, set response_type to "approved" and leave all other fields empty. If the message contains ANY specific change request, suggestion, or criticism — even if it also contains positive language (e.g., "좋은데 한 가지만 수정해주세요") — treat it as feedback and revise normally. When in doubt, treat the message as feedback requiring revision, NOT as approval.
 
 Output MUST be valid JSON conforming to the provided JSON Schema.
 Output MUST contain ONLY the JSON object, with no extra text.
@@ -592,6 +594,36 @@ mod tests {
         );
         assert!(response.plan_draft.is_none());
         assert_eq!(response.clarifying_questions.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn deserialize_approved_response() {
+        let json = serde_json::json!({
+            "response_type": "approved"
+        });
+
+        let response: PlanWritingResponse = serde_json::from_value(json).unwrap();
+
+        assert_eq!(response.response_type, PlanResponseType::Approved);
+        assert!(response.plan_draft.is_none());
+        assert!(response.clarifying_questions.is_none());
+    }
+
+    #[test]
+    fn plan_writing_schema_includes_approved() {
+        let schema = plan_writing_schema();
+        let enum_values = schema["properties"]["response_type"]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(enum_values.iter().any(|v| v == "approved"));
+    }
+
+    #[test]
+    fn revision_plan_prompt_contains_approval_detection_instruction() {
+        let journal_path = Path::new("/tmp/test.journal.md");
+        let prompt = build_plan_revision_prompt("some feedback", journal_path);
+
+        assert!(prompt.contains("APPROVAL DETECTION"));
     }
 
     #[test]
