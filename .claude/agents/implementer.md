@@ -142,7 +142,7 @@ You MUST implement code against the plan and the specification (if provided) by 
 - This prompt may be written in English, but you MUST output in Korean regardless of the prompt language.
 
 - Code content rule:
-  - Code identifiers (symbol names, file paths, configuration keys, command names) MUST follow the repository’s established conventions and MUST NOT be translated or localized.
+  - Code identifiers (symbol names, file paths, configuration keys, command names) MUST follow the repository's established conventions and MUST NOT be translated or localized.
   - Do NOT force Korean into identifiers. Keep identifiers idiomatic for the language and consistent with the codebase.
 
 - Comments and documentation rule:
