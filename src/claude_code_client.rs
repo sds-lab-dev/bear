@@ -1,5 +1,6 @@
 mod binary_finder;
 mod error;
+pub mod logger;
 mod response;
 
 pub use error::ClaudeCodeClientError;
@@ -10,6 +11,10 @@ use std::io::BufRead;
 use std::process::{Command, Stdio};
 
 use serde::de::DeserializeOwned;
+
+const TOOLS_LIST: &str = "AskUserQuestion,Bash,TaskOutput,Edit,ExitPlanMode,Glob,Grep,\
+    KillShell,MCPSearch,Read,Skill,Task,TaskCreate,TaskGet,TaskList,TaskUpdate,\
+    WebFetch,WebSearch,Write,LSP";
 
 pub struct ClaudeCodeRequest {
     pub system_prompt: Option<String>,
@@ -129,7 +134,7 @@ impl ClaudeCodeClient {
             .arg("-p")
             .arg("--allow-dangerously-skip-permissions")
             .arg("--permission-mode").arg("bypassPermissions")
-            .arg("--tools").arg("AskUserQuestion,Bash,TaskOutput,Edit,ExitPlanMode,Glob,Grep,KillShell,MCPSearch,Read,Skill,Task,TaskCreate,TaskGet,TaskList,TaskUpdate,WebFetch,WebSearch,Write,LSP");
+            .arg("--tools").arg(TOOLS_LIST);
 
         // 최초 실행이면 새 세션 ID를 생성하고, 후속 실행이면 기존 세션을 재개한다.
         let new_session_id = match &self.session_id {
@@ -165,6 +170,92 @@ impl ClaudeCodeClient {
         (command, new_session_id)
     }
 
+    fn log_invocation_details(
+        &self,
+        mode: &str,
+        request: &ClaudeCodeRequest,
+        new_session_id: &Option<String>,
+        extra_args: &[&str],
+    ) {
+        let loc = "ClaudeCodeClient::log_invocation_details";
+        let log = |msg: String| logger::write_log(loc, &msg);
+
+        log(format!("[{}] 바이너리: {}", mode, self.binary_path.display()));
+
+        if let Some(dir) = &self.working_directory {
+            log(format!("[{}] 작업 디렉토리: {}", mode, dir.display()));
+        }
+
+        log(format!(
+            "[{}] 환경 변수: ANTHROPIC_API_KEY=***, \
+             CLAUDE_CODE_EFFORT_LEVEL=high, \
+             CLAUDE_CODE_DISABLE_AUTO_MEMORY=0, \
+             CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1",
+            mode,
+        ));
+
+        log(format!(
+            "[{}] CLI 기본 인수: -p --allow-dangerously-skip-permissions \
+             --permission-mode bypassPermissions --tools {}",
+            mode, TOOLS_LIST,
+        ));
+
+        let session_info = match new_session_id {
+            Some(id) => format!("신규 생성 --session-id {}", id),
+            None => format!(
+                "기존 세션 재개 --resume {}",
+                self.session_id.as_deref().unwrap_or("unknown"),
+            ),
+        };
+        log(format!("[{}] 세션: {}", mode, session_info));
+
+        if !self.additional_work_directories.is_empty() {
+            let dirs: Vec<String> = self
+                .additional_work_directories
+                .iter()
+                .map(|d| d.display().to_string())
+                .collect();
+            log(format!(
+                "[{}] 추가 작업 디렉토리 (--add-dir): {}",
+                mode,
+                dirs.join(" "),
+            ));
+        }
+
+        if let Some(model) = &request.model {
+            log(format!("[{}] 모델 (--model): {}", mode, model));
+        }
+
+        if !extra_args.is_empty() {
+            log(format!(
+                "[{}] 추가 CLI 인수: {}",
+                mode,
+                extra_args.join(" "),
+            ));
+        }
+
+        if let Some(system_prompt) = &request.system_prompt {
+            log(format!(
+                "[{}] 시스템 프롬프트 (--append-system-prompt, {} bytes):\n{}",
+                mode,
+                system_prompt.len(),
+                system_prompt,
+            ));
+        }
+
+        log(format!(
+            "[{}] 출력 스키마 (--json-schema): {}",
+            mode, request.output_schema,
+        ));
+
+        log(format!(
+            "[{}] 사용자 프롬프트 ({} bytes):\n{}",
+            mode,
+            request.user_prompt.len(),
+            request.user_prompt,
+        ));
+    }
+
     pub fn query<T: DeserializeOwned>(
         &mut self,
         request: &ClaudeCodeRequest,
@@ -173,18 +264,37 @@ impl ClaudeCodeClient {
         command.arg("--output-format").arg("json");
         command.arg(&request.user_prompt);
 
+        crate::cli_log!("[비스트리밍 쿼리 시작]");
+        self.log_invocation_details(
+            "비스트리밍 쿼리",
+            request,
+            &new_session_id,
+            &["--output-format", "json"],
+        );
+
         let output = command.output().map_err(|err| {
+            crate::cli_log!("[비스트리밍 쿼리 실패] 명령 실행 오류: {}", err);
             ClaudeCodeClientError::CommandExecutionFailed {
                 message: err.to_string(),
             }
         })?;
 
+        crate::cli_log!("[비스트리밍 쿼리 완료] 종료 코드: {}", output.status);
+
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            crate::cli_log!("[비스트리밍 쿼리 실패] stderr:\n{}", stderr);
             return Err(ClaudeCodeClientError::CommandExecutionFailed {
                 message: stderr.to_string(),
             });
         }
+
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        crate::cli_log!(
+            "[비스트리밍 쿼리] CLI stdout ({} bytes):\n{}",
+            output.stdout.len(),
+            stdout_str,
+        );
 
         let command_session_id = new_session_id
             .as_deref()
@@ -216,14 +326,35 @@ impl ClaudeCodeClient {
         command.arg("--include-partial-messages");
         command.arg(&request.user_prompt);
 
+        crate::cli_log!("[스트리밍 쿼리 시작]");
+        self.log_invocation_details(
+            "스트리밍 쿼리",
+            request,
+            &new_session_id,
+            &[
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+            ],
+        );
+
         let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|err| ClaudeCodeClientError::CommandExecutionFailed {
-                message: err.to_string(),
+            .map_err(|err| {
+                crate::cli_log!("[스트리밍 쿼리 실패] 프로세스 생성 오류: {}", err);
+                ClaudeCodeClientError::CommandExecutionFailed {
+                    message: err.to_string(),
+                }
             })?;
+
+        crate::cli_log!(
+            "[스트리밍 쿼리] 프로세스 생성 완료 (pid: {})",
+            child.id(),
+        );
 
         let stdout = child.stdout.take().expect("stdout must be piped");
         let reader = std::io::BufReader::new(stdout);
@@ -232,7 +363,11 @@ impl ClaudeCodeClient {
         let stderr = child.stderr.take().expect("stderr must be piped");
         let stderr_thread = std::thread::spawn(move || {
             let stderr_reader = std::io::BufReader::new(stderr);
-            stderr_reader.lines().map_while(Result::ok).collect::<Vec<_>>().join("\n")
+            stderr_reader
+                .lines()
+                .map_while(Result::ok)
+                .collect::<Vec<_>>()
+                .join("\n")
         });
 
         let mut raw_lines: Vec<String> = Vec::new();
@@ -243,11 +378,13 @@ impl ClaudeCodeClient {
 
         for line_result in reader.lines() {
             let line = line_result.map_err(|err| {
+                crate::cli_log!("[스트리밍 쿼리 실패] stdout 읽기 오류: {}", err);
                 ClaudeCodeClientError::CommandExecutionFailed {
                     message: format!("stdout 읽기 실패: {}", err),
                 }
             })?;
 
+            crate::cli_log!("[스트리밍 쿼리] CLI stdout 라인: {}", &line);
             raw_lines.push(line.clone());
 
             let json: serde_json::Value = match serde_json::from_str(&line) {
@@ -280,6 +417,7 @@ impl ClaudeCodeClient {
         }
 
         let status = child.wait().map_err(|err| {
+            crate::cli_log!("[스트리밍 쿼리 실패] 프로세스 대기 오류: {}", err);
             ClaudeCodeClientError::CommandExecutionFailed {
                 message: err.to_string(),
             }
@@ -287,12 +425,18 @@ impl ClaudeCodeClient {
 
         let stderr_content = stderr_thread.join().unwrap_or_default();
 
+        crate::cli_log!("[스트리밍 쿼리 완료] 종료 코드: {}", status);
+        if !stderr_content.is_empty() {
+            crate::cli_log!("[스트리밍 쿼리] CLI stderr:\n{}", &stderr_content);
+        }
+
         if !status.success() && result_value.is_none() {
             let message = if stderr_content.is_empty() {
                 format!("프로세스 종료 코드: {}", status)
             } else {
                 stderr_content
             };
+            crate::cli_log!("[스트리밍 쿼리 실패] 비정상 종료: {}", &message);
             return Err(ClaudeCodeClientError::CommandExecutionFailed {
                 message,
             });
@@ -309,12 +453,18 @@ impl ClaudeCodeClient {
         let response: CliResponse = serde_json::from_value(result_json)?;
 
         if response.is_error {
+            let error_message = response.result.unwrap_or_default();
+            crate::cli_log!(
+                "[스트리밍 쿼리 실패] CLI 오류 응답: {}",
+                &error_message,
+            );
             return Err(ClaudeCodeClientError::CliReturnedError {
-                message: response.result.unwrap_or_default(),
+                message: error_message,
             });
         }
 
-        let output_value = response.structured_output
+        let output_value = response
+            .structured_output
             .ok_or(ClaudeCodeClientError::MissingStructuredOutput)?;
         let result: T = serde_json::from_value(output_value)?;
 

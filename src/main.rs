@@ -1,8 +1,10 @@
 use std::process::ExitCode;
 
-use workspace::config::Config;
+use bear::config::Config;
 
 fn main() -> ExitCode {
+    bear::claude_code_client::logger::init();
+
     let config = match Config::from_env() {
         Ok(config) => config,
         Err(err) => {
@@ -11,7 +13,7 @@ fn main() -> ExitCode {
         }
     };
 
-    if let Err(err) = workspace::ui::run(config) {
+    if let Err(err) = bear::ui::run(config) {
         eprintln!("Error: {err}");
         return ExitCode::FAILURE;
     }
