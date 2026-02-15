@@ -654,6 +654,7 @@ impl App {
         }
 
         let approved_spec = self.approved_spec.clone().unwrap_or_default();
+        let user_request = self.confirmed_requirements.clone().unwrap_or_default();
         let user_feedback = if is_initial {
             None
         } else {
@@ -671,7 +672,7 @@ impl App {
 
         std::thread::spawn(move || {
             let user_prompt = if is_initial {
-                planning::build_initial_plan_prompt(&approved_spec)
+                planning::build_initial_plan_prompt(&user_request, &approved_spec)
             } else {
                 let feedback = user_feedback.unwrap_or_default();
                 planning::build_plan_revision_prompt(&feedback)

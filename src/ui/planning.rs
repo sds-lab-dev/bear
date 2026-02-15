@@ -539,8 +539,10 @@ User feedback:
 {{USER_FEEDBACK}}
 >>>"#;
 
-pub fn build_initial_plan_prompt(approved_spec: &str) -> String {
-    INITIAL_PLAN_PROMPT_TEMPLATE.replace("{{APPROVED_SPEC}}", approved_spec)
+pub fn build_initial_plan_prompt(user_request: &str, approved_spec: &str) -> String {
+    INITIAL_PLAN_PROMPT_TEMPLATE
+        .replace("{{USER_REQUEST}}", user_request)
+        .replace("{{APPROVED_SPEC}}", approved_spec)
 }
 
 pub fn build_plan_revision_prompt(user_feedback: &str) -> String {
@@ -641,9 +643,10 @@ mod tests {
     }
 
     #[test]
-    fn build_initial_prompt_contains_spec() {
-        let prompt = build_initial_plan_prompt("# Approved Spec\nBuild a CLI tool");
+    fn build_initial_prompt_contains_user_request_and_spec() {
+        let prompt = build_initial_plan_prompt("Build a CLI tool", "# Approved Spec\nBuild a CLI tool");
 
+        assert!(prompt.contains("Build a CLI tool"));
         assert!(prompt.contains("# Approved Spec\nBuild a CLI tool"));
         assert!(prompt.contains("Planning Process"));
     }
