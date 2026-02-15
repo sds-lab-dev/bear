@@ -428,7 +428,8 @@ You MUST decide on one of the following status markers based on your implementat
 - Datetime: <YYYY-MM-DD HH:MM:SS>
 - Workspace: <path of the workspace>
 - Repository: <repository name>
-- Base Branch/Commit: <branch name>/<commit hash> (the point from which the worktree was created)
+- Base Branch: <branch name> (the branch that this worktree is based on)
+- Base Commit: <commit hash> (the commit that this worktree is based on)
 
 # Task Summary
 - Describe the specific task you implemented in this session.
