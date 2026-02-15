@@ -347,6 +347,11 @@ When you finish you MUST produce an output in Markdown format that includes:
 
 4. **Implementation**
    - A numbered, ordered sequence of tasks.
+   - Each task MUST have a unique task id following the format "TASK-<number>":
+     - `<number>` is a sequential integer starting from 0, incrementing by 1 for each subsequent task.
+     - Example: `TASK-0`, `TASK-1`, `TASK-2`, ...
+     - Task IDs MUST be unique across the entire plan.
+     - Task IDs MUST be stable and consistent across plan revisions. If a task is removed, its ID should not be reused for a new task; instead, skip to the next number (e.g., if `TASK-1` is removed, the next new task should be `TASK-2`, not `TASK-1`).
    - For each task, specify concrete file-level changes:
      - Purpose of the change (1–2 sentences)
      - File path(s)

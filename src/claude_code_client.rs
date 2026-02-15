@@ -68,6 +68,7 @@ pub struct ClaudeCodeClient {
     api_key: String,
     additional_work_directories: Vec<PathBuf>,
     session_id: Option<String>,
+    working_directory: Option<PathBuf>,
 }
 
 impl ClaudeCodeClient {
@@ -77,6 +78,10 @@ impl ClaudeCodeClient {
 
     pub fn reset_session(&mut self) {
         self.session_id = None;
+    }
+
+    pub fn set_working_directory(&mut self, path: PathBuf) {
+        self.working_directory = Some(path);
     }
 
     pub fn new(
@@ -101,6 +106,7 @@ impl ClaudeCodeClient {
             api_key,
             additional_work_directories,
             session_id: None,
+            working_directory: None,
         })
     }
 
@@ -110,6 +116,11 @@ impl ClaudeCodeClient {
         let disable_feedback_survey = "1";
 
         let mut command = Command::new(&self.binary_path);
+
+        if let Some(dir) = &self.working_directory {
+            command.current_dir(dir);
+        }
+
         command
             .env("ANTHROPIC_API_KEY", &self.api_key)
             .env("CLAUDE_CODE_EFFORT_LEVEL", model_effort_level)

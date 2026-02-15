@@ -7,6 +7,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::claude_code_client::{ClaudeCodeClient, ClaudeCodeRequest};
 use crate::config::Config;
 use super::clarification::{self, ClarificationQuestions, QaRound};
+use super::coding::{
+    self, CodingPhaseState, CodingTask, CodingTaskResult, CodingTaskStatus,
+    TaskExtractionResponse, TaskReport,
+};
 use super::planning::{self, PlanJournal, PlanResponseType, PlanWritingResponse};
 use super::session_naming::{self, SessionNameResponse};
 use super::spec_writing::{self, SpecJournal, SpecResponseType, SpecWritingResponse};
@@ -32,6 +36,7 @@ enum InputMode {
     SpecFeedback,
     PlanClarificationAnswer,
     PlanFeedback,
+    Coding,
     Done,
 }
 
@@ -39,6 +44,8 @@ enum AgentOutcome {
     Clarification(ClarificationQuestions),
     SpecWriting(SpecWritingResponse),
     Planning(PlanWritingResponse),
+    TaskExtraction(TaskExtractionResponse),
+    CodingTaskCompleted(CodingTaskResult),
 }
 
 struct AgentThreadResult {
@@ -78,6 +85,7 @@ pub struct App {
     approved_spec: Option<String>,
     session_name: Option<String>,
     session_date_dir: Option<String>,
+    coding_state: Option<CodingPhaseState>,
 }
 
 impl App {
@@ -120,6 +128,7 @@ impl App {
             approved_spec: None,
             session_name: None,
             session_date_dir: None,
+            coding_state: None,
         })
     }
 
@@ -156,7 +165,7 @@ impl App {
                     self.handle_multiline_input(key_event, Self::submit_plan_feedback);
                 }
             }
-            InputMode::AgentThinking | InputMode::Done => {
+            InputMode::AgentThinking | InputMode::Coding | InputMode::Done => {
                 if key_event.code == KeyCode::Esc {
                     self.should_quit = true;
                 }
@@ -179,7 +188,7 @@ impl App {
                 let cleaned = text.replace("\r\n", "\n").replace('\r', "\n");
                 self.insert_text_at_cursor(&cleaned);
             }
-            InputMode::AgentThinking | InputMode::Done => {}
+            InputMode::AgentThinking | InputMode::Coding | InputMode::Done => {}
         }
     }
 
@@ -214,7 +223,19 @@ impl App {
                         Ok(AgentOutcome::Planning(response)) => {
                             self.handle_plan_response(response);
                         }
-                        Err(error_message) => self.handle_agent_error(error_message),
+                        Ok(AgentOutcome::TaskExtraction(response)) => {
+                            self.handle_task_extraction_response(response);
+                        }
+                        Ok(AgentOutcome::CodingTaskCompleted(result)) => {
+                            self.handle_coding_task_result(result);
+                        }
+                        Err(error_message) => {
+                            if matches!(self.input_mode, InputMode::Coding) {
+                                self.handle_coding_task_error(error_message);
+                            } else {
+                                self.handle_agent_error(error_message);
+                            }
+                        }
                     }
                     return;
                 }
@@ -248,16 +269,25 @@ impl App {
     }
 
     pub fn is_thinking(&self) -> bool {
-        matches!(self.input_mode, InputMode::AgentThinking)
+        matches!(self.input_mode, InputMode::AgentThinking | InputMode::Coding)
     }
 
     pub fn thinking_indicator(&self) -> &'static str {
         let dots = (self.thinking_started_at.elapsed().as_millis() / 500) % 4;
-        match dots {
-            0 => "Analyzing",
-            1 => "Analyzing.",
-            2 => "Analyzing..",
-            _ => "Analyzing...",
+        if matches!(self.input_mode, InputMode::Coding) {
+            match dots {
+                0 => "Coding",
+                1 => "Coding.",
+                2 => "Coding..",
+                _ => "Coding...",
+            }
+        } else {
+            match dots {
+                0 => "Analyzing",
+                1 => "Analyzing.",
+                2 => "Analyzing..",
+                _ => "Analyzing...",
+            }
         }
     }
 
@@ -281,7 +311,7 @@ impl App {
                     "[Enter] Submit feedback  [Ctrl+A] Approve  [Alt+Enter] New line  [Esc] Quit"
                 }
             }
-            InputMode::AgentThinking | InputMode::Done => "[Esc] Quit",
+            InputMode::AgentThinking | InputMode::Coding | InputMode::Done => "[Esc] Quit",
         }
     }
 
@@ -848,7 +878,329 @@ impl App {
             let _ = journal.append_approved_plan(&plan);
         }
 
-        self.add_system_message("개발 계획이 승인되었습니다.");
+        self.add_system_message("개발 계획이 승인되었습니다. 작업 목록을 추출합니다.");
+        self.start_task_extraction();
+    }
+
+    fn start_task_extraction(&mut self) {
+        let mut client = self.claude_client.take().expect("client must be available");
+        client.reset_session();
+
+        let plan_journal_path = self
+            .plan_journal
+            .as_ref()
+            .map(|j| j.file_path().to_path_buf())
+            .unwrap_or_default();
+
+        let (sender, receiver) = mpsc::channel();
+        self.agent_result_receiver = Some(receiver);
+        self.input_mode = InputMode::AgentThinking;
+        self.thinking_started_at = Instant::now();
+
+        std::thread::spawn(move || {
+            let request = ClaudeCodeRequest {
+                system_prompt: Some(coding::task_extraction_system_prompt().to_string()),
+                user_prompt: coding::build_task_extraction_prompt(&plan_journal_path),
+                model: None,
+                output_schema: coding::task_extraction_schema(),
+            };
+
+            let stream_sender = sender.clone();
+            let outcome = client
+                .query_streaming::<TaskExtractionResponse, _>(&request, |line| {
+                    let _ = stream_sender.send(AgentStreamMessage::StreamLine(line));
+                })
+                .map(AgentOutcome::TaskExtraction)
+                .map_err(|err| err.to_string());
+
+            let _ = sender.send(AgentStreamMessage::Completed(AgentThreadResult {
+                client,
+                outcome,
+            }));
+        });
+    }
+
+    fn handle_task_extraction_response(&mut self, response: TaskExtractionResponse) {
+        if response.tasks.is_empty() {
+            self.add_system_message("추출된 작업이 없습니다.");
+            self.input_mode = InputMode::Done;
+            return;
+        }
+
+        let mut schedule_message = format!(
+            "{}개 작업이 추출되었습니다:\n",
+            response.tasks.len()
+        );
+        for (i, task) in response.tasks.iter().enumerate() {
+            schedule_message.push_str(&format!(
+                "\n{}. [{}] {}",
+                i + 1,
+                task.task_id,
+                task.title,
+            ));
+            if !task.dependencies.is_empty() {
+                schedule_message.push_str(&format!(
+                    " (의존: {})",
+                    task.dependencies.join(", "),
+                ));
+            }
+        }
+        self.add_system_message(&schedule_message);
+
+        let workspace = self.confirmed_workspace.clone().unwrap();
+        let session_name = self
+            .session_name
+            .clone()
+            .unwrap_or_else(|| "unnamed".to_string());
+
+        let integration_branch =
+            match coding::create_integration_branch(&workspace, &session_name) {
+                Ok(branch) => branch,
+                Err(err) => {
+                    self.add_system_message(&format!("Failed to create git branch: {}", err));
+                    self.input_mode = InputMode::Done;
+                    return;
+                }
+            };
+
+        let worktree_path = match coding::create_worktree(&workspace, &integration_branch) {
+            Ok(path) => path,
+            Err(err) => {
+                self.add_system_message(&format!("Failed to create git worktree: {}", err));
+                self.input_mode = InputMode::Done;
+                return;
+            }
+        };
+
+        self.add_system_message(&format!(
+            "코딩 워크스페이스 준비 완료.\n브랜치: {}\n워크트리: {}",
+            integration_branch,
+            worktree_path.display(),
+        ));
+
+        self.coding_state = Some(CodingPhaseState {
+            tasks: response.tasks,
+            current_task_index: 0,
+            task_reports: Vec::new(),
+            worktree_path,
+            integration_branch,
+        });
+
+        self.start_next_coding_task();
+    }
+
+    /// 다음 코딩 태스크에 필요한 데이터를 추출한다.
+    /// 남은 태스크가 없으면 None을 반환한다.
+    fn extract_next_coding_task_data(
+        &self,
+    ) -> Option<(CodingTask, usize, usize, Vec<PathBuf>, PathBuf)> {
+        let coding_state = self.coding_state.as_ref()?;
+        if coding_state.current_task_index >= coding_state.tasks.len() {
+            return None;
+        }
+
+        let task = coding_state.tasks[coding_state.current_task_index].clone();
+        let total = coding_state.tasks.len();
+        let index = coding_state.current_task_index;
+        let upstream_report_paths =
+            coding::collect_upstream_report_paths(&task, &coding_state.task_reports);
+        let worktree_path = coding_state.worktree_path.clone();
+
+        Some((task, total, index, upstream_report_paths, worktree_path))
+    }
+
+    fn start_next_coding_task(&mut self) {
+        let extracted = self.extract_next_coding_task_data();
+        let (task, total, index, upstream_report_paths, worktree_path) = match extracted {
+            Some(data) => data,
+            None => {
+                self.finish_coding_phase();
+                return;
+            }
+        };
+
+        self.add_system_message(&format!(
+            "작업 {}/{} 시작: [{}] {}",
+            index + 1,
+            total,
+            task.task_id,
+            task.title,
+        ));
+
+        let spec_journal_path = self
+            .journal
+            .as_ref()
+            .map(|j| j.file_path().to_path_buf())
+            .unwrap_or_default();
+        let plan_journal_path = self
+            .plan_journal
+            .as_ref()
+            .map(|j| j.file_path().to_path_buf())
+            .unwrap_or_default();
+        let api_key = self.config.api_key().to_string();
+
+        let mut client = match ClaudeCodeClient::new(
+            api_key,
+            vec![worktree_path.clone()],
+        ) {
+            Ok(c) => c,
+            Err(err) => {
+                self.add_system_message(&format!(
+                    "Failed to create coding agent client: {}",
+                    err,
+                ));
+                self.input_mode = InputMode::Done;
+                return;
+            }
+        };
+        client.set_working_directory(worktree_path);
+
+        let (sender, receiver) = mpsc::channel();
+        self.agent_result_receiver = Some(receiver);
+        self.input_mode = InputMode::Coding;
+        self.thinking_started_at = Instant::now();
+
+        std::thread::spawn(move || {
+            let user_prompt = coding::build_coding_task_prompt(
+                &task,
+                &spec_journal_path,
+                &plan_journal_path,
+                &upstream_report_paths,
+            );
+
+            let request = ClaudeCodeRequest {
+                system_prompt: Some(coding::coding_agent_system_prompt().to_string()),
+                user_prompt,
+                model: None,
+                output_schema: coding::coding_task_result_schema(),
+            };
+
+            let stream_sender = sender.clone();
+            let outcome = client
+                .query_streaming::<CodingTaskResult, _>(&request, |line| {
+                    let _ = stream_sender.send(AgentStreamMessage::StreamLine(line));
+                })
+                .map(AgentOutcome::CodingTaskCompleted)
+                .map_err(|err| err.to_string());
+
+            let _ = sender.send(AgentStreamMessage::Completed(AgentThreadResult {
+                client,
+                outcome,
+            }));
+        });
+    }
+
+    fn handle_coding_task_result(&mut self, result: CodingTaskResult) {
+        let task_id = {
+            let coding_state = self.coding_state.as_ref().unwrap();
+            coding_state.tasks[coding_state.current_task_index]
+                .task_id
+                .clone()
+        };
+
+        let status_label = match &result.status {
+            CodingTaskStatus::ImplementationSuccess => "SUCCESS",
+            CodingTaskStatus::ImplementationBlocked => "BLOCKED",
+        };
+        self.add_system_message(&format!(
+            "작업 [{}] 완료: {}",
+            task_id, status_label,
+        ));
+
+        self.save_and_advance_task(task_id, result.status, result.report);
+    }
+
+    fn handle_coding_task_error(&mut self, error_message: String) {
+        let task_id = {
+            let coding_state = self.coding_state.as_ref().unwrap();
+            coding_state.tasks[coding_state.current_task_index]
+                .task_id
+                .clone()
+        };
+
+        self.add_system_message(&format!(
+            "Task [{}] error: {}",
+            task_id, error_message,
+        ));
+
+        let report = format!(
+            "IMPLEMENTATION_BLOCKED\n---\nAgent error: {}",
+            error_message,
+        );
+        self.save_and_advance_task(
+            task_id,
+            CodingTaskStatus::ImplementationBlocked,
+            report,
+        );
+    }
+
+    fn save_and_advance_task(
+        &mut self,
+        task_id: String,
+        status: CodingTaskStatus,
+        report: String,
+    ) {
+        let workspace = self.confirmed_workspace.clone().unwrap();
+        let date_dir = self.session_date_dir.clone().unwrap_or_default();
+        let session_name = self.session_name.clone().unwrap_or_default();
+
+        let report_file_path = match coding::save_task_report(
+            &workspace,
+            &date_dir,
+            &session_name,
+            &task_id,
+            &report,
+        ) {
+            Ok(path) => path,
+            Err(err) => {
+                self.add_system_message(&format!("Failed to save report: {}", err));
+                PathBuf::new()
+            }
+        };
+
+        let coding_state = self.coding_state.as_mut().unwrap();
+        coding_state.task_reports.push(TaskReport {
+            task_id,
+            status,
+            report,
+            report_file_path,
+        });
+        coding_state.current_task_index += 1;
+
+        self.start_next_coding_task();
+    }
+
+    fn finish_coding_phase(&mut self) {
+        let coding_state = self.coding_state.as_ref().unwrap();
+        let workspace = self.confirmed_workspace.clone().unwrap();
+        let worktree_path = coding_state.worktree_path.clone();
+        let integration_branch = coding_state.integration_branch.clone();
+
+        let success_count = coding_state
+            .task_reports
+            .iter()
+            .filter(|r| r.status == CodingTaskStatus::ImplementationSuccess)
+            .count();
+        let blocked_count = coding_state
+            .task_reports
+            .iter()
+            .filter(|r| r.status == CodingTaskStatus::ImplementationBlocked)
+            .count();
+
+        self.add_system_message(&format!(
+            "코딩 단계 완료. 성공: {}, 차단: {}",
+            success_count, blocked_count,
+        ));
+
+        if let Err(err) = coding::remove_worktree(&workspace, &worktree_path) {
+            self.add_system_message(&format!("워크트리 제거 실패: {}", err));
+        }
+
+        self.add_system_message(&format!(
+            "통합 브랜치가 유지됩니다: {}",
+            integration_branch,
+        ));
+
         self.input_mode = InputMode::Done;
     }
 

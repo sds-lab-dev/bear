@@ -1,5 +1,6 @@
 pub mod app;
 mod clarification;
+pub mod coding;
 mod error;
 mod event;
 mod renderer;
