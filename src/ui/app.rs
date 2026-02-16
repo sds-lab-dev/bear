@@ -35,8 +35,7 @@ pub struct ChatMessage {
 enum InputMode {
     WorkspaceConfirm,
     ModeSelection,
-    SpecFileInput,
-    PlanFileInput,
+    SessionDirInput,
     RequirementsInput,
     AgentThinking,
     ClarificationAnswer,
@@ -106,8 +105,8 @@ pub struct App {
     build_test_command_phase: BuildTestCommandPhase,
     fatal_error: Option<String>,
     selected_mode_index: usize,
-    imported_spec_path: Option<PathBuf>,
-    imported_plan_path: Option<PathBuf>,
+    resumed_session_dir: Option<PathBuf>,
+    resumed_has_plan: bool,
     pending_validation_kind: Option<FileKind>,
     pub pending_external_editor: bool,
 }
@@ -180,8 +179,8 @@ impl App {
             build_test_command_phase: BuildTestCommandPhase::BuildCommand,
             fatal_error: None,
             selected_mode_index: 0,
-            imported_spec_path: None,
-            imported_plan_path: None,
+            resumed_session_dir: None,
+            resumed_has_plan: false,
             pending_validation_kind: None,
             pending_external_editor: false,
         })
@@ -195,11 +194,8 @@ impl App {
         match self.input_mode {
             InputMode::WorkspaceConfirm => self.handle_workspace_confirm(key_event),
             InputMode::ModeSelection => self.handle_mode_selection(key_event),
-            InputMode::SpecFileInput => {
-                self.handle_single_line_input(key_event, Self::submit_spec_file_path);
-            }
-            InputMode::PlanFileInput => {
-                self.handle_single_line_input(key_event, Self::submit_plan_file_path);
+            InputMode::SessionDirInput => {
+                self.handle_single_line_input(key_event, Self::submit_session_dir_path);
             }
             InputMode::RequirementsInput => {
                 self.handle_multiline_input(key_event, Self::submit_requirements);
@@ -245,8 +241,7 @@ impl App {
     pub fn handle_paste(&mut self, text: String) {
         match self.input_mode {
             InputMode::WorkspaceConfirm
-            | InputMode::SpecFileInput
-            | InputMode::PlanFileInput => {
+            | InputMode::SessionDirInput => {
                 let cleaned = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
                 self.insert_text_at_cursor(&cleaned);
             }
@@ -362,8 +357,7 @@ impl App {
         matches!(
             self.input_mode,
             InputMode::WorkspaceConfirm
-                | InputMode::SpecFileInput
-                | InputMode::PlanFileInput
+                | InputMode::SessionDirInput
                 | InputMode::RequirementsInput
                 | InputMode::ClarificationAnswer
                 | InputMode::SpecClarificationAnswer
@@ -418,10 +412,9 @@ impl App {
     pub fn help_text(&self) -> &str {
         match self.input_mode {
             InputMode::WorkspaceConfirm
-            | InputMode::SpecFileInput
-            | InputMode::PlanFileInput => "[Enter] Confirm  [Esc] Quit",
+            | InputMode::SessionDirInput => "[Enter] Confirm  [Esc] Quit",
             InputMode::ModeSelection => {
-                "[1-3] Select  [Up/Down] Navigate  [Enter] Confirm  [Esc] Quit"
+                "[1-2] Select  [Up/Down] Navigate  [Enter] Confirm  [Esc] Quit"
             }
             InputMode::RequirementsInput
             | InputMode::ClarificationAnswer
@@ -554,12 +547,11 @@ impl App {
                 self.selected_mode_index = self.selected_mode_index.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.selected_mode_index = (self.selected_mode_index + 1).min(2);
+                self.selected_mode_index = (self.selected_mode_index + 1).min(1);
             }
             KeyCode::Enter => self.select_work_mode(self.selected_mode_index),
             KeyCode::Char('1') => self.select_work_mode(0),
             KeyCode::Char('2') => self.select_work_mode(1),
-            KeyCode::Char('3') => self.select_work_mode(2),
             KeyCode::Esc => self.should_quit = true,
             _ => {}
         }
@@ -570,14 +562,13 @@ impl App {
 
         let label = match index {
             0 => "처음부터 만들기",
-            1 => "스펙 파일 있음",
-            _ => "스펙 및 플랜 파일 있음",
+            _ => "이전 세션 이어서",
         };
         self.add_user_message(label);
 
         match index {
             0 => self.transition_to_requirements_input(),
-            1 | 2 => self.transition_to_spec_file_input(),
+            1 => self.transition_to_session_dir_input(),
             _ => unreachable!(),
         }
     }
@@ -588,25 +579,16 @@ impl App {
             "작업 모드를 선택하세요:\n\
              \n\
              1. 처음부터 만들기\n\
-             2. 스펙 파일 있음\n\
-             3. 스펙 및 플랜 파일 있음",
+             2. 이전 세션 이어서",
         );
         self.input_mode = InputMode::ModeSelection;
     }
 
-    fn transition_to_spec_file_input(&mut self) {
+    fn transition_to_session_dir_input(&mut self) {
         self.add_system_message(
-            "스펙 파일 경로를 입력하세요. (절대 경로 또는 상대 경로)",
+            "이전 세션 디렉토리 경로를 입력하세요. (절대 경로 또는 상대 경로)",
         );
-        self.input_mode = InputMode::SpecFileInput;
-        self.clear_input();
-    }
-
-    fn transition_to_plan_file_input(&mut self) {
-        self.add_system_message(
-            "플랜 파일 경로를 입력하세요. (절대 경로 또는 상대 경로)",
-        );
-        self.input_mode = InputMode::PlanFileInput;
+        self.input_mode = InputMode::SessionDirInput;
         self.clear_input();
     }
 
@@ -615,7 +597,7 @@ impl App {
         self.input_mode = InputMode::RequirementsInput;
     }
 
-    fn submit_spec_file_path(&mut self) {
+    fn submit_session_dir_path(&mut self) {
         let raw_path = self.input_buffer.trim().to_string();
         if raw_path.is_empty() {
             return;
@@ -625,46 +607,37 @@ impl App {
         self.clear_input();
 
         let workspace = self.confirmed_workspace.clone().unwrap();
-        match file_validation::validate_file_locally(&raw_path, &workspace) {
-            Ok(resolved_path) => {
-                self.imported_spec_path = Some(resolved_path.clone());
-                self.pending_validation_kind = Some(FileKind::Spec);
-                self.add_system_message("스펙 파일을 검증 중입니다...");
-                self.start_file_content_validation(resolved_path);
-            }
-            Err(error_message) => {
-                self.add_system_message(&error_message);
-                self.add_system_message(
-                    "스펙 파일 경로를 다시 입력하세요. (절대 경로 또는 상대 경로)",
-                );
-            }
-        }
-    }
+        let resolved_dir =
+            match file_validation::validate_directory_locally(&raw_path, &workspace) {
+                Ok(dir) => dir,
+                Err(error_message) => {
+                    self.add_system_message(&error_message);
+                    self.add_system_message(
+                        "이전 세션 디렉토리 경로를 다시 입력하세요. (절대 경로 또는 상대 경로)",
+                    );
+                    return;
+                }
+            };
 
-    fn submit_plan_file_path(&mut self) {
-        let raw_path = self.input_buffer.trim().to_string();
-        if raw_path.is_empty() {
+        let spec_path = resolved_dir.join("spec.md");
+        if !spec_path.is_file() {
+            self.add_system_message(&format!(
+                "디렉토리에 spec.md 파일이 없습니다: {}",
+                resolved_dir.display()
+            ));
+            self.add_system_message(
+                "이전 세션 디렉토리 경로를 다시 입력하세요. (절대 경로 또는 상대 경로)",
+            );
             return;
         }
 
-        self.add_user_message(&raw_path);
-        self.clear_input();
+        let has_plan = resolved_dir.join("plan.md").is_file();
 
-        let workspace = self.confirmed_workspace.clone().unwrap();
-        match file_validation::validate_file_locally(&raw_path, &workspace) {
-            Ok(resolved_path) => {
-                self.imported_plan_path = Some(resolved_path.clone());
-                self.pending_validation_kind = Some(FileKind::Plan);
-                self.add_system_message("플랜 파일을 검증 중입니다...");
-                self.start_file_content_validation(resolved_path);
-            }
-            Err(error_message) => {
-                self.add_system_message(&error_message);
-                self.add_system_message(
-                    "플랜 파일 경로를 다시 입력하세요. (절대 경로 또는 상대 경로)",
-                );
-            }
-        }
+        self.resumed_session_dir = Some(resolved_dir);
+        self.resumed_has_plan = has_plan;
+        self.pending_validation_kind = Some(FileKind::Spec);
+        self.add_system_message("스펙 파일을 검증 중입니다...");
+        self.start_file_content_validation(spec_path);
     }
 
     fn start_file_content_validation(&mut self, path: PathBuf) {
@@ -708,59 +681,58 @@ impl App {
 
         if !result.valid {
             self.add_system_message(&format!("파일 검증 실패: {}", result.reason));
-            match kind {
-                FileKind::Spec => {
-                    self.imported_spec_path = None;
-                    self.transition_to_spec_file_input();
-                }
-                FileKind::Plan => {
-                    self.imported_plan_path = None;
-                    self.transition_to_plan_file_input();
-                }
-            }
+            self.resumed_session_dir = None;
+            self.resumed_has_plan = false;
+            self.transition_to_session_dir_input();
             return;
         }
 
         match kind {
             FileKind::Spec => {
-                let spec_path = self.imported_spec_path.as_ref().unwrap();
-                match std::fs::read_to_string(spec_path) {
+                let session_dir = self.resumed_session_dir.clone().unwrap();
+                let spec_path = session_dir.join("spec.md");
+                match std::fs::read_to_string(&spec_path) {
                     Ok(content) => {
                         self.approved_spec = Some(content);
                         self.add_system_message("스펙 파일이 검증되었습니다.");
 
-                        if self.selected_mode_index == 2 {
-                            self.transition_to_plan_file_input();
+                        if self.resumed_has_plan {
+                            let plan_path = session_dir.join("plan.md");
+                            self.pending_validation_kind = Some(FileKind::Plan);
+                            self.add_system_message("플랜 파일을 검증 중입니다...");
+                            self.start_file_content_validation(plan_path);
                         } else {
-                            self.start_imported_file_workflow();
+                            self.start_resumed_session_workflow();
                         }
                     }
                     Err(err) => {
                         self.add_system_message(&format!("스펙 파일 읽기 실패: {}", err));
-                        self.imported_spec_path = None;
-                        self.transition_to_spec_file_input();
+                        self.resumed_session_dir = None;
+                        self.transition_to_session_dir_input();
                     }
                 }
             }
             FileKind::Plan => {
-                let plan_path = self.imported_plan_path.as_ref().unwrap();
-                match std::fs::read_to_string(plan_path) {
+                let session_dir = self.resumed_session_dir.clone().unwrap();
+                let plan_path = session_dir.join("plan.md");
+                match std::fs::read_to_string(&plan_path) {
                     Ok(content) => {
                         self.last_plan_draft = Some(content);
                         self.add_system_message("플랜 파일이 검증되었습니다.");
-                        self.start_imported_file_workflow();
+                        self.start_resumed_session_workflow();
                     }
                     Err(err) => {
                         self.add_system_message(&format!("플랜 파일 읽기 실패: {}", err));
-                        self.imported_plan_path = None;
-                        self.transition_to_plan_file_input();
+                        self.resumed_session_dir = None;
+                        self.resumed_has_plan = false;
+                        self.transition_to_session_dir_input();
                     }
                 }
             }
         }
     }
 
-    fn start_imported_file_workflow(&mut self) {
+    fn start_resumed_session_workflow(&mut self) {
         if let Err(error_message) = self.ensure_claude_client() {
             self.add_system_message(&format!("클라이언트 생성 실패: {}", error_message));
             self.input_mode = InputMode::Done;
@@ -770,20 +742,16 @@ impl App {
         let mut client = self.claude_client.take().expect("client must be available");
         client.reset_session();
 
-        let is_plan_mode = self.selected_mode_index == 2;
-        let imported_spec_path = self.imported_spec_path.clone().unwrap();
-        let imported_plan_path = self.imported_plan_path.clone();
-
-        // 가져온 스펙 파일이 위치한 디렉토리를 journal_dir로 설정
-        let journal_dir = imported_spec_path.parent().unwrap().to_path_buf();
-        self.journal_dir = Some(journal_dir.clone());
+        let has_plan = self.resumed_has_plan;
+        let resumed_dir = self.resumed_session_dir.clone().unwrap();
+        let workspace = self.confirmed_workspace.clone().unwrap();
 
         let (sender, receiver) = mpsc::channel();
         self.agent_result_receiver = Some(receiver);
         self.input_mode = InputMode::AgentThinking;
         self.thinking_started_at = Instant::now();
 
-        if is_plan_mode {
+        if has_plan {
             self.add_system_message(
                 "세션을 초기화하고 코드 구현을 시작합니다...",
             );
@@ -794,35 +762,64 @@ impl App {
         }
 
         std::thread::spawn(move || {
-            let session_name = session_naming::generate_session_id();
+            let session_id = session_naming::generate_session_id();
             let date_dir = session_naming::today_date_string();
+            let new_journal_dir = workspace
+                .join(".bear")
+                .join(&date_dir)
+                .join(&session_id);
+
+            if let Err(err) = std::fs::create_dir_all(&new_journal_dir) {
+                let _ = sender.send(AgentStreamMessage::Completed(AgentThreadResult {
+                    client,
+                    outcome: Err(format!("세션 디렉토리 생성 실패: {}", err)),
+                }));
+                return;
+            }
 
             let _ = sender.send(AgentStreamMessage::SessionName {
-                name: session_name,
+                name: session_id,
                 date_dir,
             });
 
-            // 가져온 파일의 디렉토리에 user-request.md 생성
+            // spec.md를 이전 세션에서 새 세션 디렉토리로 복사
+            let source_spec = resumed_dir.join("spec.md");
+            let dest_spec = new_journal_dir.join("spec.md");
+            if let Err(err) = std::fs::copy(&source_spec, &dest_spec) {
+                let _ = sender.send(AgentStreamMessage::Completed(AgentThreadResult {
+                    client,
+                    outcome: Err(format!("스펙 파일 복사 실패: {}", err)),
+                }));
+                return;
+            }
+
+            // user-request.md 생성
             let user_request_content = format!(
-                "외부 스펙 파일에서 가져옴: {}",
-                imported_spec_path.display()
+                "{} 세션으로부터 재시작 되었음.",
+                resumed_dir.display()
             );
-            let user_request_path = journal_dir.join("user-request.md");
+            let user_request_path = new_journal_dir.join("user-request.md");
             let _ = std::fs::write(&user_request_path, &user_request_content);
 
-            // 가져온 파일의 실제 경로를 그대로 사용
-            let spec_path = imported_spec_path;
-            let plan_path = imported_plan_path
-                .unwrap_or_else(|| journal_dir.join("plan.md"));
+            if has_plan {
+                // plan.md를 이전 세션에서 새 세션 디렉토리로 복사
+                let source_plan = resumed_dir.join("plan.md");
+                let dest_plan = new_journal_dir.join("plan.md");
+                if let Err(err) = std::fs::copy(&source_plan, &dest_plan) {
+                    let _ = sender.send(AgentStreamMessage::Completed(AgentThreadResult {
+                        client,
+                        outcome: Err(format!("플랜 파일 복사 실패: {}", err)),
+                    }));
+                    return;
+                }
 
-            if is_plan_mode {
-                // 모드 3: 태스크 추출 시작
+                // 태스크 추출 시작
                 client.set_system_prompt(
                     Some(coding::task_extraction_system_prompt().to_string()),
                 );
 
                 let request = ClaudeCodeRequest {
-                    user_prompt: coding::build_task_extraction_prompt(&plan_path),
+                    user_prompt: coding::build_task_extraction_prompt(&dest_plan),
                     output_schema: coding::task_extraction_schema(),
                 };
 
@@ -839,13 +836,13 @@ impl App {
                     outcome,
                 }));
             } else {
-                // 모드 2: 플랜 작성 시작
+                // 플랜 작성 시작
                 client.set_system_prompt(Some(planning::system_prompt().to_string()));
 
                 let request = ClaudeCodeRequest {
                     user_prompt: planning::build_initial_plan_prompt(
                         &user_request_path,
-                        &spec_path,
+                        &dest_spec,
                     ),
                     output_schema: planning::plan_writing_schema(),
                 };

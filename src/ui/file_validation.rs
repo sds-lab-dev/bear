@@ -77,6 +77,7 @@ pub fn build_validation_prompt(file_path: &Path, kind: FileKind) -> String {
 
 /// 파일 경로를 로컬에서 검증한다. 상대 경로는 `base_dir` 기준으로 해석한다.
 /// 성공 시 절대 경로를 반환하고, 실패 시 한국어 에러 메시지를 반환한다.
+#[allow(dead_code)]
 pub fn validate_file_locally(raw_path: &str, base_dir: &Path) -> Result<PathBuf, String> {
     let path = PathBuf::from(raw_path);
     let absolute_path = if path.is_absolute() {
@@ -116,6 +117,39 @@ pub fn validate_file_locally(raw_path: &str, base_dir: &Path) -> Result<PathBuf,
     if metadata.len() == 0 {
         return Err(format!(
             "파일이 비어 있습니다: {}",
+            absolute_path.display()
+        ));
+    }
+
+    Ok(absolute_path)
+}
+
+/// 디렉토리 경로를 로컬에서 검증한다. 상대 경로는 `base_dir` 기준으로 해석한다.
+/// 성공 시 절대 경로를 반환하고, 실패 시 한국어 에러 메시지를 반환한다.
+pub fn validate_directory_locally(raw_path: &str, base_dir: &Path) -> Result<PathBuf, String> {
+    let path = PathBuf::from(raw_path);
+    let absolute_path = if path.is_absolute() {
+        path
+    } else {
+        let joined = base_dir.join(&path);
+        fs::canonicalize(&joined).map_err(|_| {
+            format!(
+                "디렉토리가 존재하지 않습니다: {}",
+                joined.display()
+            )
+        })?
+    };
+
+    if !absolute_path.exists() {
+        return Err(format!(
+            "디렉토리가 존재하지 않습니다: {}",
+            absolute_path.display()
+        ));
+    }
+
+    if !absolute_path.is_dir() {
+        return Err(format!(
+            "디렉토리가 아닙니다: {}",
             absolute_path.display()
         ));
     }
@@ -245,5 +279,51 @@ mod tests {
     #[test]
     fn system_prompt_is_nonempty() {
         assert!(!system_prompt().is_empty());
+    }
+
+    #[test]
+    fn validate_nonexistent_directory() {
+        let tmp = TempDir::new().unwrap();
+        let result = validate_directory_locally("/nonexistent/dir", tmp.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("존재하지 않습니다"));
+    }
+
+    #[test]
+    fn validate_file_not_directory() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("file.txt");
+        fs::write(&file_path, "content").unwrap();
+        let result = validate_directory_locally(
+            &file_path.display().to_string(),
+            tmp.path(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("디렉토리가 아닙니다"));
+    }
+
+    #[test]
+    fn validate_valid_directory() {
+        let tmp = TempDir::new().unwrap();
+        let dir_path = tmp.path().join("session");
+        fs::create_dir(&dir_path).unwrap();
+        let result = validate_directory_locally(
+            &dir_path.display().to_string(),
+            tmp.path(),
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), dir_path);
+    }
+
+    #[test]
+    fn validate_relative_directory_path() {
+        let tmp = TempDir::new().unwrap();
+        let dir_path = tmp.path().join("sessions").join("prev");
+        fs::create_dir_all(&dir_path).unwrap();
+        let result = validate_directory_locally("sessions/prev", tmp.path());
+        assert!(result.is_ok());
+        let resolved = result.unwrap();
+        assert!(resolved.is_absolute());
+        assert!(resolved.ends_with("sessions/prev"));
     }
 }

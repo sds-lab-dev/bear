@@ -430,10 +430,9 @@ fn build_right_column(max_width: usize) -> Vec<(String, style::Color, bool)> {
     lines
 }
 
-const MODE_LABELS: [&str; 3] = [
+const MODE_LABELS: [&str; 2] = [
     "1. 처음부터 만들기",
-    "2. 스펙 파일 있음",
-    "3. 스펙 및 플랜 파일 있음",
+    "2. 이전 세션 이어서",
 ];
 
 fn write_mode_selection_menu(
