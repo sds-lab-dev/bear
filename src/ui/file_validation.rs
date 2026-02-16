@@ -50,8 +50,7 @@ The file does NOT need to follow an exact template. If the document is clearly d
 File path:
 {{FILE_PATH}}
 
-Output MUST be valid JSON conforming to the provided JSON Schema.
-Output MUST contain ONLY the JSON object, with no extra text."#;
+Output MUST be valid JSON conforming to the provided JSON Schema."#;
 
 const PLAN_VALIDATION_PROMPT_TEMPLATE: &str = r#"Read the following file and determine whether it is a valid software development plan document.
 
@@ -66,8 +65,7 @@ The file does NOT need to follow an exact template. If the document is clearly d
 File path:
 {{FILE_PATH}}
 
-Output MUST be valid JSON conforming to the provided JSON Schema.
-Output MUST contain ONLY the JSON object, with no extra text."#;
+Output MUST be valid JSON conforming to the provided JSON Schema."#;
 
 pub fn build_validation_prompt(file_path: &Path, kind: FileKind) -> String {
     let template = match kind {

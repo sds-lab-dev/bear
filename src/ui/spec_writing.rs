@@ -111,7 +111,6 @@ The user may not immediately decide. Instead, they may ask counter-questions to 
 ---
 
 Output MUST be valid JSON conforming to the provided JSON Schema.
-Output MUST contain ONLY the JSON object, with no extra text.
 
 You MUST read the original user request from the following file before proceeding:
 - {{USER_REQUEST_PATH}}
@@ -147,7 +146,6 @@ IMPORTANT:
 - APPROVAL DETECTION: Before attempting any revision, first evaluate whether the user's feedback message is expressing approval or acceptance of the current draft rather than requesting changes. Examples of approval expressions include (but are not limited to): "승인합니다", "좋습니다", "진행해주세요", "괜찮습니다", "이대로 해주세요", "OK", "LGTM", "approve", "looks good". If the user's message UNAMBIGUOUSLY expresses approval with NO revision requests whatsoever, set response_type to "approved" and leave all other fields empty. If the message contains ANY specific change request, suggestion, or criticism — even if it also contains positive language (e.g., "좋은데 한 가지만 수정해주세요") — treat it as feedback and revise normally. When in doubt, treat the message as feedback requiring revision, NOT as approval.
 
 Output MUST be valid JSON conforming to the provided JSON Schema.
-Output MUST contain ONLY the JSON object, with no extra text.
 
 User feedback:
 <<<

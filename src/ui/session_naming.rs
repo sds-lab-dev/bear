@@ -34,7 +34,6 @@ Rules:
 Example names: "user-auth-system", "cli-tool-refactor", "api-rate-limiting", "file-upload"
 
 Output MUST be valid JSON conforming to the provided JSON Schema.
-Output MUST contain ONLY the JSON object, with no extra text.
 
 User requirement:
 <<<

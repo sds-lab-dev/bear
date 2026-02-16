@@ -12,7 +12,8 @@ use super::coding::{
     self, BuildTestCommands, BuildTestOutcome, BuildTestRepairResult,
     BuildTestRepairStatus, CodingPhaseState, CodingTask, CodingTaskResult,
     CodingTaskStatus, ConflictResolutionResult, ConflictResolutionStatus,
-    RebaseOutcome, TaskExtractionResponse, TaskReport, TaskWorktreeInfo,
+    RebaseOutcome, ReviewResult, ReviewStatus, TaskExtractionResponse,
+    TaskReport, TaskWorktreeInfo,
 };
 use super::file_validation::{self, FileKind, FileValidationResponse};
 use super::planning::{self, PlanResponseType, PlanWritingResponse};
@@ -54,6 +55,7 @@ enum AgentOutcome {
     Planning(PlanWritingResponse),
     TaskExtraction(TaskExtractionResponse),
     CodingTaskCompleted(CodingTaskResult),
+    ReviewCompleted(ReviewResult),
     ConflictResolutionCompleted(ConflictResolutionResult),
     BuildTestCompleted(BuildTestOutcome),
     BuildTestRepairCompleted(BuildTestRepairResult),
@@ -98,6 +100,7 @@ pub struct App {
     session_date_dir: Option<String>,
     coding_state: Option<CodingPhaseState>,
     pending_coding_report: Option<String>,
+    review_state: Option<ReviewState>,
     pending_build_test: Option<PendingBuildTest>,
     build_test_command_phase: BuildTestCommandPhase,
     fatal_error: Option<String>,
@@ -113,6 +116,16 @@ struct PendingBuildTest {
     report: String,
     is_retry: bool,
 }
+
+struct ReviewState {
+    task_id: String,
+    report: String,
+    iteration_count: usize,
+    reviewer_client: Option<ClaudeCodeClient>,
+    coding_client: Option<ClaudeCodeClient>,
+}
+
+const MAX_REVIEW_ITERATIONS: usize = 3;
 
 enum BuildTestCommandPhase {
     BuildCommand,
@@ -160,6 +173,7 @@ impl App {
             session_date_dir: None,
             coding_state: None,
             pending_coding_report: None,
+            review_state: None,
             pending_build_test: None,
             build_test_command_phase: BuildTestCommandPhase::BuildCommand,
             fatal_error: None,
@@ -297,6 +311,9 @@ impl App {
                         }
                         Ok(AgentOutcome::CodingTaskCompleted(result)) => {
                             self.handle_coding_task_result(result);
+                        }
+                        Ok(AgentOutcome::ReviewCompleted(result)) => {
+                            self.handle_review_result(result);
                         }
                         Ok(AgentOutcome::ConflictResolutionCompleted(result)) => {
                             self.handle_conflict_resolution_result(result);
@@ -1540,12 +1557,266 @@ impl App {
         ));
 
         if result.status == CodingTaskStatus::ImplementationBlocked {
+            self.review_state = None;
             self.cleanup_current_task_worktree();
             self.save_and_advance_task(task_id, result.status, result.report);
             return;
         }
 
-        self.rebase_and_merge_task(task_id, result.report);
+        let coding_client = self.claude_client.take();
+
+        match self.review_state.as_mut() {
+            None => {
+                self.review_state = Some(ReviewState {
+                    task_id: task_id.clone(),
+                    report: result.report.clone(),
+                    iteration_count: 0,
+                    reviewer_client: None,
+                    coding_client,
+                });
+            }
+            Some(rs) => {
+                rs.report = result.report.clone();
+                rs.coding_client = coding_client;
+            }
+        }
+
+        self.start_review();
+    }
+
+    fn start_review(&mut self) {
+        let review_state = self.review_state.as_ref().unwrap();
+        let is_followup = review_state.iteration_count > 0;
+        let task_id = review_state.task_id.clone();
+        let report = review_state.report.clone();
+
+        let coding_state = self.coding_state.as_ref().unwrap();
+        let worktree_info = coding_state.current_task_worktree.as_ref().unwrap();
+        let worktree_path = worktree_info.worktree_path.clone();
+
+        let git_commit_revision = match coding::get_latest_commit_revision(&worktree_path) {
+            Ok(rev) => rev,
+            Err(err) => {
+                self.add_system_message(&format!(
+                    "[{}] git 커밋 해시 조회 실패: {}. 리뷰 건너뜀.",
+                    task_id, err,
+                ));
+                self.finalize_review_and_proceed();
+                return;
+            }
+        };
+
+        let workspace = self.confirmed_workspace.clone().unwrap();
+        let date_dir = self.session_date_dir.clone().unwrap_or_default();
+        let session_name = self.session_name.clone().unwrap_or_default();
+
+        let report_path = match coding::save_task_report(
+            &workspace, &date_dir, &session_name, &task_id, &report,
+        ) {
+            Ok(path) => path,
+            Err(err) => {
+                self.add_system_message(&format!(
+                    "[{}] 리포트 저장 실패: {}. 리뷰 건너뜀.",
+                    task_id, err,
+                ));
+                self.finalize_review_and_proceed();
+                return;
+            }
+        };
+
+        let spec_path = match (&self.confirmed_workspace, &self.session_date_dir, &self.session_name) {
+            (Some(ws), Some(date), Some(name)) => {
+                ws.join(".bear").join(date).join(name).join("spec.md")
+            }
+            _ => PathBuf::new(),
+        };
+        let plan_path = match (&self.confirmed_workspace, &self.session_date_dir, &self.session_name) {
+            (Some(ws), Some(date), Some(name)) => {
+                ws.join(".bear").join(date).join(name).join("plan.md")
+            }
+            _ => PathBuf::new(),
+        };
+
+        let user_prompt = if is_followup {
+            coding::build_followup_review_prompt(
+                &spec_path, &plan_path, &report_path, &git_commit_revision,
+            )
+        } else {
+            coding::build_initial_review_prompt(
+                &spec_path, &plan_path, &report_path, &git_commit_revision,
+            )
+        };
+
+        let api_key = self.config.api_key().to_string();
+        let mut reviewer_client = match self.review_state.as_mut().unwrap().reviewer_client.take() {
+            Some(client) => client,
+            None => {
+                match ClaudeCodeClient::new(
+                    api_key,
+                    vec![worktree_path.clone()],
+                    Some(coding::review_agent_system_prompt().to_string()),
+                ) {
+                    Ok(mut c) => {
+                        c.set_working_directory(worktree_path.clone());
+                        c
+                    }
+                    Err(err) => {
+                        self.add_system_message(&format!(
+                            "[{}] 리뷰 에이전트 클라이언트 생성 실패: {}. 리뷰 건너뜀.",
+                            task_id, err,
+                        ));
+                        self.finalize_review_and_proceed();
+                        return;
+                    }
+                }
+            }
+        };
+        reviewer_client.set_working_directory(worktree_path);
+
+        let iteration_label = self.review_state.as_ref().unwrap().iteration_count + 1;
+        self.add_system_message(&format!(
+            "[{}] 코드 리뷰 시작 (iteration {})...",
+            task_id, iteration_label,
+        ));
+
+        let (sender, receiver) = mpsc::channel();
+        self.agent_result_receiver = Some(receiver);
+        self.input_mode = InputMode::Coding;
+        self.thinking_started_at = Instant::now();
+
+        std::thread::spawn(move || {
+            let request = ClaudeCodeRequest {
+                user_prompt,
+                output_schema: coding::review_result_schema(),
+            };
+
+            let stream_sender = sender.clone();
+            let outcome = reviewer_client
+                .query_streaming::<ReviewResult, _>(&request, |line| {
+                    let _ = stream_sender.send(AgentStreamMessage::StreamLine(line));
+                })
+                .map(AgentOutcome::ReviewCompleted)
+                .map_err(|err| err.to_string());
+
+            let _ = sender.send(AgentStreamMessage::Completed(AgentThreadResult {
+                client: reviewer_client,
+                outcome,
+            }));
+        });
+    }
+
+    fn handle_review_result(&mut self, result: ReviewResult) {
+        let reviewer_client = self.claude_client.take();
+        let review_state = self.review_state.as_mut().unwrap();
+        review_state.reviewer_client = reviewer_client;
+        review_state.iteration_count += 1;
+
+        let task_id = review_state.task_id.clone();
+
+        match result.review_result {
+            ReviewStatus::Approved => {
+                self.add_system_message(&format!("[{}] 코드 리뷰 승인.", task_id));
+                self.finalize_review_and_proceed();
+            }
+            ReviewStatus::RequestChanges => {
+                let iteration_count = self.review_state.as_ref().unwrap().iteration_count;
+
+                if iteration_count >= MAX_REVIEW_ITERATIONS {
+                    self.add_system_message(&format!(
+                        "[{}] 리뷰 최대 반복 횟수({}) 도달. 자동 승인 처리.",
+                        task_id, MAX_REVIEW_ITERATIONS,
+                    ));
+                    self.finalize_review_and_proceed();
+                    return;
+                }
+
+                self.add_system_message(&format!(
+                    "[{}] 리뷰어 변경 요청 (iteration {}/{}): {}",
+                    task_id, iteration_count, MAX_REVIEW_ITERATIONS,
+                    result.review_comment,
+                ));
+
+                self.start_coding_revision(result.review_comment);
+            }
+        }
+    }
+
+    fn finalize_review_and_proceed(&mut self) {
+        let review_state = self.review_state.take().unwrap();
+        let task_id = review_state.task_id;
+        let report = review_state.report;
+
+        self.claude_client = review_state.coding_client;
+
+        self.rebase_and_merge_task(task_id, report);
+    }
+
+    fn start_coding_revision(&mut self, review_comment: String) {
+        let coding_state = self.coding_state.as_ref().unwrap();
+        let task = coding_state.tasks[coding_state.current_task_index].clone();
+        let worktree_info = coding_state.current_task_worktree.as_ref().unwrap();
+        let worktree_path = worktree_info.worktree_path.clone();
+        let task_id = task.task_id.clone();
+
+        let spec_path = match (&self.confirmed_workspace, &self.session_date_dir, &self.session_name) {
+            (Some(ws), Some(date), Some(name)) => {
+                ws.join(".bear").join(date).join(name).join("spec.md")
+            }
+            _ => PathBuf::new(),
+        };
+        let plan_path = match (&self.confirmed_workspace, &self.session_date_dir, &self.session_name) {
+            (Some(ws), Some(date), Some(name)) => {
+                ws.join(".bear").join(date).join(name).join("plan.md")
+            }
+            _ => PathBuf::new(),
+        };
+
+        let user_prompt = coding::build_coding_revision_prompt(
+            &task, &spec_path, &plan_path, &review_comment,
+        );
+
+        let mut client = match self.review_state.as_mut().unwrap().coding_client.take() {
+            Some(c) => c,
+            None => {
+                self.add_system_message(&format!(
+                    "[{}] 코딩 에이전트 세션을 찾을 수 없습니다. 리뷰 자동 승인 처리.",
+                    task_id,
+                ));
+                self.finalize_review_and_proceed();
+                return;
+            }
+        };
+        client.set_working_directory(worktree_path);
+
+        self.add_system_message(&format!(
+            "[{}] 리뷰 피드백 반영을 위한 코딩 에이전트 재시작...",
+            task_id,
+        ));
+
+        let (sender, receiver) = mpsc::channel();
+        self.agent_result_receiver = Some(receiver);
+        self.input_mode = InputMode::Coding;
+        self.thinking_started_at = Instant::now();
+
+        std::thread::spawn(move || {
+            let request = ClaudeCodeRequest {
+                user_prompt,
+                output_schema: coding::coding_task_result_schema(),
+            };
+
+            let stream_sender = sender.clone();
+            let outcome = client
+                .query_streaming::<CodingTaskResult, _>(&request, |line| {
+                    let _ = stream_sender.send(AgentStreamMessage::StreamLine(line));
+                })
+                .map(AgentOutcome::CodingTaskCompleted)
+                .map_err(|err| err.to_string());
+
+            let _ = sender.send(AgentStreamMessage::Completed(AgentThreadResult {
+                client,
+                outcome,
+            }));
+        });
     }
 
     fn rebase_and_merge_task(
@@ -1605,6 +1876,7 @@ impl App {
             task_id, error_message,
         ));
 
+        self.review_state = None;
         self.cleanup_current_task_worktree();
 
         let report = format!(
@@ -1944,10 +2216,29 @@ impl App {
         let task_branch = worktree_info.task_branch.clone();
         let integration_branch = coding_state.integration_branch.clone();
 
+        let date_dir = self.session_date_dir.clone().unwrap_or_default();
+        let session_name = self.session_name.clone().unwrap_or_default();
+
+        if let Err(err) = coding::save_and_commit_task_report_in_worktree(
+            &worktree_path, &date_dir, &session_name, &task_id, &report,
+        ) {
+            self.add_system_message(&format!(
+                "[{}] 워크트리 리포트 커밋 실패: {}. 리포트 없이 진행.",
+                task_id, err,
+            ));
+        }
+
         self.add_system_message(&format!(
             "[{}] 통합 브랜치로 fast-forward 머지 시작...",
             task_id,
         ));
+
+        let workspace = self.confirmed_workspace.clone().unwrap();
+        let report_file_path = workspace
+            .join(".bear")
+            .join(&date_dir)
+            .join(&session_name)
+            .join(format!("{}.md", task_id));
 
         match coding::fast_forward_merge_task_branch(
             &worktree_path,
@@ -1957,10 +2248,11 @@ impl App {
             Ok(()) => {
                 self.add_system_message(&format!("[{}] fast-forward 머지 완료.", task_id));
                 self.cleanup_current_task_worktree();
-                self.save_and_advance_task(
+                self.advance_task(
                     task_id,
                     CodingTaskStatus::ImplementationSuccess,
                     report,
+                    report_file_path,
                 );
             }
             Err(err) => {
@@ -2117,6 +2409,16 @@ impl App {
             }
         };
 
+        self.advance_task(task_id, status, report, report_file_path);
+    }
+
+    fn advance_task(
+        &mut self,
+        task_id: String,
+        status: CodingTaskStatus,
+        report: String,
+        report_file_path: PathBuf,
+    ) {
         let coding_state = self.coding_state.as_mut().unwrap();
         coding_state.task_reports.push(TaskReport {
             task_id,

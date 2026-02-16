@@ -71,7 +71,6 @@ When you ask questions, they MUST collectively cover the following areas across 
 
 Constraints:
 - Output MUST be valid JSON that conforms to the provided JSON Schema.
-- Output MUST contain ONLY the JSON object, with no extra text.
 - Provide 0–5 questions total.
 - Each question should be precise, answerable, and non-overlapping.
 - Inspect the current workspace using the available tools. Read the files required to understand the context and to avoid asking questions that are already answered by existing files.

@@ -103,6 +103,20 @@ pub enum BuildTestRepairStatus {
     FixFailed,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ReviewResult {
+    pub review_result: ReviewStatus,
+    pub review_comment: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub enum ReviewStatus {
+    #[serde(rename = "APPROVED")]
+    Approved,
+    #[serde(rename = "REQUEST_CHANGES")]
+    RequestChanges,
+}
+
 // ---------------------------------------------------------------------------
 // JSON Schemas
 // ---------------------------------------------------------------------------
@@ -186,6 +200,23 @@ pub fn build_test_repair_result_schema() -> serde_json::Value {
     })
 }
 
+pub fn review_result_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "review_result": {
+                "type": "string",
+                "enum": ["APPROVED", "REQUEST_CHANGES"]
+            },
+            "review_comment": {
+                "type": "string"
+            }
+        },
+        "required": ["review_result", "review_comment"],
+        "additionalProperties": false
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Prompts – Task Extraction
 // ---------------------------------------------------------------------------
@@ -203,15 +234,13 @@ Rules:
 - If the plan contains no explicit task decomposition section, treat the entire plan as a single task with task id "TASK-00".
 - Output MUST be Korean for titles and descriptions, preserving code identifiers as-is.
 
-Output MUST be valid JSON conforming to the provided JSON Schema.
-Output MUST contain ONLY the JSON object, with no extra text."#
+Output MUST be valid JSON conforming to the provided JSON Schema."#
 }
 
 const TASK_EXTRACTION_PROMPT_TEMPLATE: &str = r#"Extract all implementation tasks from the approved development plan.
 Return them in topological order (dependency-first) as a JSON array.
 
 Output MUST be valid JSON conforming to the provided JSON Schema.
-Output MUST contain ONLY the JSON object, with no extra text.
 
 ---
 
@@ -600,7 +629,6 @@ const CODING_USER_PROMPT_TEMPLATE: &str = r#"Based on the given specification an
 - Do NOT implement any task that is not explicitly assigned to you.
 
 Output MUST be valid JSON conforming to the provided JSON Schema.
-Output MUST contain ONLY the JSON object, with no extra text.
 
 ---
 
@@ -664,8 +692,7 @@ Instructions:
 4. If the rebase continues and produces more conflicts, resolve them and repeat.
 5. If resolution is not possible, run `git rebase --abort` and report failure.
 
-Output MUST be valid JSON conforming to the provided JSON Schema.
-Output MUST contain ONLY the JSON object, with no extra text."#;
+Output MUST be valid JSON conforming to the provided JSON Schema."#;
 
 pub fn build_conflict_resolution_prompt(
     task_id: &str,
@@ -703,8 +730,7 @@ Instructions:
 4. Run the test command (`{{TEST_COMMAND}}`) and verify all tests pass.
 5. If you cannot fix the issue, report failure with a clear explanation.
 
-Output MUST be valid JSON conforming to the provided JSON Schema.
-Output MUST contain ONLY the JSON object, with no extra text."#;
+Output MUST be valid JSON conforming to the provided JSON Schema."#;
 
 pub fn build_build_test_repair_prompt(
     task_id: &str,
@@ -717,6 +743,230 @@ pub fn build_build_test_repair_prompt(
         .replace("{{BUILD_COMMAND}}", build_command)
         .replace("{{TEST_COMMAND}}", test_command)
         .replace("{{ERROR_OUTPUT}}", error_output)
+}
+
+// ---------------------------------------------------------------------------
+// Prompts – Review Agent
+// ---------------------------------------------------------------------------
+
+pub fn review_agent_system_prompt() -> &'static str {
+    r#"# Role
+
+You are the **code review** assistant. You SHOULD review the implementation against that the implementation plan and the specification.
+
+The specification MUST be treated as the canonical source of requirements and constraints if provided in order to guide the review process.
+
+**Core rules:**
+- Do NOT implement features or rewrite code. Review and critique only.
+- Compare the plan and the actual changes line by line where relevant.
+- You MUST verify that the implementation adheres to the specification; plan compliance does not imply spec compliance.
+- Be precise and concrete. Avoid vague feedback.
+
+---
+
+# Review process
+
+You MUST review the implementation against the plan and the specification by checking the following aspects:
+
+- Verify plan adherence:
+  - Are all planned steps implemented?
+  - Are there unplanned changes or scope creep?
+  - Are any steps partially implemented or missing?
+
+- Verify specification compliance:
+  - Does the implementation meet all requirements stated in the specification?
+  - Are there any deviations from the specification? If so, are they justified?
+
+- Check correctness and robustness:
+  - Logic correctness.
+  - Error handling and edge cases.
+  - Consistency with existing patterns.
+
+- Check testing strategy:
+  - Are unit tests updated or added where behavior changed?
+  - For integration tests, is Testcontainers used when feasible?
+  - If not used, is the stated reason technically valid?
+
+- Check maintainability:
+  - Naming and structure.
+  - Readability and separation of concerns.
+  - No unnecessary refactoring mixed with functional changes.
+  - Unused code or dead paths.
+
+- Check risk and impact:
+  - Backward compatibility.
+  - Migration or rollout risks.
+  - Security or performance concerns if relevant.
+
+---
+
+# Output language (mandatory)
+
+Your default output language MUST be English.
+
+---
+
+# Verdict criteria (mandatory)
+
+**You MUST produce one of the following verdicts based on your review:**
+- `APPROVED`: the implementation is sound, complete, and meets all requirements.
+- `REQUEST_CHANGES`: the implementation has issues that must be addressed before approval.
+
+---
+
+# Output
+
+When you finish you MUST produce an output as follows.
+Output MUST be valid JSON conforming to the provided JSON Schema.
+
+## Review result
+`APPROVED` or `REQUEST_CHANGES`
+
+## Review comment (Markdown)
+```markdown
+# Review Result
+- State whether the implementation is `APPROVED` or `REQUEST_CHANGES`.
+
+# Summary
+- High-level summary.
+
+# Findings
+- Incorrect parts in the implementation.
+- Bugs or logical errors.
+- Risky assumptions.
+- Test gaps.
+
+# Test Review
+- Unit test coverage assessment.
+- Integration test strategy assessment (Testcontainers usage).
+
+# Recommendations
+- Concrete, actionable corrections.
+- Ordered by importance.
+```
+
+---
+
+# Quality bar
+
+- Feedback must be actionable.
+- Every major claim should point to:
+  - An implementation item, or
+  - A specific code area, or
+  - A test case.
+
+Do NOT:
+- Propose a completely new design unless the current plan is invalid.
+- Implement fixes yourself.
+- Expand scope beyond the plan."#
+}
+
+const INITIAL_REVIEW_PROMPT_TEMPLATE: &str = r#"# Instructions for Initial Code Review
+
+Review the given code implementation against the provided specification and plan. Your task is to determine whether the implementation is correct, complete, and meets all requirements.
+
+You MUST read following files before starting the review:
+- Specification: {{SPEC_PATH}}
+- Implementation plan: {{PLAN_PATH}}
+- Implementation report: {{IMPLEMENTATION_REPORT_PATH}}
+- Git commit:
+  - {{GIT_COMMIT_REVISION}}
+
+You MUST read the code changes from the provided workspace files using available tools.
+
+Output MUST be valid JSON conforming to the provided JSON Schema."#;
+
+pub fn build_initial_review_prompt(
+    spec_path: &Path,
+    plan_path: &Path,
+    report_path: &Path,
+    git_commit_revision: &str,
+) -> String {
+    INITIAL_REVIEW_PROMPT_TEMPLATE
+        .replace("{{SPEC_PATH}}", &spec_path.display().to_string())
+        .replace("{{PLAN_PATH}}", &plan_path.display().to_string())
+        .replace("{{IMPLEMENTATION_REPORT_PATH}}", &report_path.display().to_string())
+        .replace("{{GIT_COMMIT_REVISION}}", git_commit_revision)
+}
+
+const FOLLOWUP_REVIEW_PROMPT_TEMPLATE: &str = r#"# Instructions for Follow-up Code Review
+
+You are performing a follow-up review of a code implementation that has already undergone an initial review. Your task is to determine whether the revised implementation adequately addresses the issues raised in the previous review and meets all requirements.
+
+You MUST read following files before starting the review:
+- Specification: {{SPEC_PATH}}
+- Implementation plan: {{PLAN_PATH}}
+- Follow-up implementation report: {{IMPLEMENTATION_REPORT_PATH}}
+- Git commit for the follow-up changes:
+  - {{GIT_COMMIT_REVISION}}
+
+You MUST read the code changes from the provided workspace files using available tools.
+
+Output MUST be valid JSON conforming to the provided JSON Schema."#;
+
+pub fn build_followup_review_prompt(
+    spec_path: &Path,
+    plan_path: &Path,
+    report_path: &Path,
+    git_commit_revision: &str,
+) -> String {
+    FOLLOWUP_REVIEW_PROMPT_TEMPLATE
+        .replace("{{SPEC_PATH}}", &spec_path.display().to_string())
+        .replace("{{PLAN_PATH}}", &plan_path.display().to_string())
+        .replace("{{IMPLEMENTATION_REPORT_PATH}}", &report_path.display().to_string())
+        .replace("{{GIT_COMMIT_REVISION}}", git_commit_revision)
+}
+
+// ---------------------------------------------------------------------------
+// Prompts – Coding Revision
+// ---------------------------------------------------------------------------
+
+const CODING_REVISION_PROMPT_TEMPLATE: &str = r#"The reviewer has requested changes to your implementation. You MUST address the review feedback below.
+
+This is a **revision** request, not a new implementation. Focus specifically on the issues raised in the review.
+
+---
+
+Review feedback:
+<<<
+{{REVIEW_COMMENT}}
+>>>
+
+---
+
+Task context:
+<<<
+Task ID: {{TASK_ID}}
+Task Title: {{TASK_TITLE}}
+>>>
+
+You MUST read following files for context before making changes:
+- Specification:
+  - {{SPEC_PATH}}
+- Plan:
+  - {{PLAN_PATH}}
+
+Instructions:
+1. Carefully read the review feedback above.
+2. Address each point raised by the reviewer.
+3. Make the necessary code changes.
+4. Run build and tests to verify your changes.
+5. Make a single commit with all changes.
+
+Output MUST be valid JSON conforming to the provided JSON Schema."#;
+
+pub fn build_coding_revision_prompt(
+    task: &CodingTask,
+    spec_path: &Path,
+    plan_path: &Path,
+    review_comment: &str,
+) -> String {
+    CODING_REVISION_PROMPT_TEMPLATE
+        .replace("{{TASK_ID}}", &task.task_id)
+        .replace("{{TASK_TITLE}}", &task.title)
+        .replace("{{SPEC_PATH}}", &spec_path.display().to_string())
+        .replace("{{PLAN_PATH}}", &plan_path.display().to_string())
+        .replace("{{REVIEW_COMMENT}}", review_comment)
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,6 +1279,21 @@ pub fn delete_branch(
     Ok(())
 }
 
+pub fn get_latest_commit_revision(worktree_path: &Path) -> Result<String, String> {
+    let output = Command::new("git")
+        .current_dir(worktree_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|e| format!("failed to execute git rev-parse: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("failed to get latest commit: {}", stderr.trim()));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Report Management
 // ---------------------------------------------------------------------------
@@ -1073,6 +1338,50 @@ pub fn collect_upstream_report_paths(
                 .map(|r| r.report_file_path.clone())
         })
         .collect()
+}
+
+pub fn save_and_commit_task_report_in_worktree(
+    worktree_path: &Path,
+    date_dir: &str,
+    session_name: &str,
+    task_id: &str,
+    report: &str,
+) -> Result<PathBuf, String> {
+    let report_dir = worktree_path
+        .join(".bear")
+        .join(date_dir)
+        .join(session_name);
+    fs::create_dir_all(&report_dir)
+        .map_err(|e| format!("failed to create report directory: {}", e))?;
+
+    let file_path = report_dir.join(format!("{}.md", task_id));
+    fs::write(&file_path, report)
+        .map_err(|e| format!("failed to write report file: {}", e))?;
+
+    let add_output = Command::new("git")
+        .current_dir(worktree_path)
+        .args(["add", &file_path.display().to_string()])
+        .output()
+        .map_err(|e| format!("failed to git add report: {}", e))?;
+
+    if !add_output.status.success() {
+        let stderr = String::from_utf8_lossy(&add_output.stderr);
+        return Err(format!("failed to git add report: {}", stderr.trim()));
+    }
+
+    let commit_message = format!("Add implementation report for {}", task_id);
+    let commit_output = Command::new("git")
+        .current_dir(worktree_path)
+        .args(["commit", "-m", &commit_message])
+        .output()
+        .map_err(|e| format!("failed to git commit report: {}", e))?;
+
+    if !commit_output.status.success() {
+        let stderr = String::from_utf8_lossy(&commit_output.stderr);
+        return Err(format!("failed to commit report: {}", stderr.trim()));
+    }
+
+    Ok(file_path)
 }
 
 // ---------------------------------------------------------------------------
@@ -1797,5 +2106,151 @@ mod tests {
         assert!(prompt.contains("make build"));
         assert!(prompt.contains("make test"));
         assert!(prompt.contains("cannot find module"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Review schema / prompt / deserialization tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn review_result_schema_is_valid_json() {
+        let schema = review_result_schema();
+        assert_eq!(schema["type"], "object");
+
+        let result_enum = schema["properties"]["review_result"]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(result_enum.iter().any(|v| v == "APPROVED"));
+        assert!(result_enum.iter().any(|v| v == "REQUEST_CHANGES"));
+        assert!(schema["properties"]["review_comment"].is_object());
+    }
+
+    #[test]
+    fn deserialize_review_result_approved() {
+        let json = serde_json::json!({
+            "review_result": "APPROVED",
+            "review_comment": "코드 품질이 좋습니다."
+        });
+
+        let result: ReviewResult = serde_json::from_value(json).unwrap();
+        assert_eq!(result.review_result, ReviewStatus::Approved);
+        assert!(result.review_comment.contains("코드 품질"));
+    }
+
+    #[test]
+    fn deserialize_review_result_request_changes() {
+        let json = serde_json::json!({
+            "review_result": "REQUEST_CHANGES",
+            "review_comment": "에러 핸들링이 부족합니다."
+        });
+
+        let result: ReviewResult = serde_json::from_value(json).unwrap();
+        assert_eq!(result.review_result, ReviewStatus::RequestChanges);
+        assert!(result.review_comment.contains("에러 핸들링"));
+    }
+
+    #[test]
+    fn initial_review_prompt_contains_all_fields() {
+        let prompt = build_initial_review_prompt(
+            Path::new("/workspace/.bear/spec.md"),
+            Path::new("/workspace/.bear/plan.md"),
+            Path::new("/workspace/.bear/TASK-00.md"),
+            "abc1234",
+        );
+
+        assert!(prompt.contains("spec.md"));
+        assert!(prompt.contains("plan.md"));
+        assert!(prompt.contains("TASK-00.md"));
+        assert!(prompt.contains("abc1234"));
+        assert!(prompt.contains("Initial Code Review"));
+    }
+
+    #[test]
+    fn followup_review_prompt_contains_all_fields() {
+        let prompt = build_followup_review_prompt(
+            Path::new("/workspace/.bear/spec.md"),
+            Path::new("/workspace/.bear/plan.md"),
+            Path::new("/workspace/.bear/TASK-01.md"),
+            "def5678",
+        );
+
+        assert!(prompt.contains("spec.md"));
+        assert!(prompt.contains("plan.md"));
+        assert!(prompt.contains("TASK-01.md"));
+        assert!(prompt.contains("def5678"));
+        assert!(prompt.contains("Follow-up Code Review"));
+    }
+
+    #[test]
+    fn coding_revision_prompt_contains_review_comment() {
+        let task = CodingTask {
+            task_id: "TASK-00".to_string(),
+            title: "기본 타입 정의".to_string(),
+            description: "핵심 타입을 정의합니다.".to_string(),
+            dependencies: vec![],
+        };
+
+        let prompt = build_coding_revision_prompt(
+            &task,
+            Path::new("/workspace/.bear/spec.md"),
+            Path::new("/workspace/.bear/plan.md"),
+            "에러 핸들링을 추가해주세요.",
+        );
+
+        assert!(prompt.contains("에러 핸들링을 추가해주세요."));
+        assert!(prompt.contains("revision"));
+        assert!(prompt.contains("TASK-00"));
+        assert!(prompt.contains("기본 타입 정의"));
+    }
+
+    #[test]
+    fn get_latest_commit_revision_returns_hash() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+        init_git_repo(workspace);
+        make_commit(workspace, "init.txt", "init", "initial commit");
+
+        let revision = get_latest_commit_revision(workspace).unwrap();
+
+        assert!(!revision.is_empty());
+        assert_eq!(revision.len(), 40);
+        assert!(revision.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn save_and_commit_task_report_in_worktree_creates_committed_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+        init_git_repo(workspace);
+        make_commit(workspace, "init.txt", "init", "initial commit");
+
+        let integration = create_integration_branch(workspace, "test").unwrap();
+        let task_branch = create_task_branch(workspace, &integration, "TASK-00").unwrap();
+        let worktree_path = create_worktree(workspace, &task_branch).unwrap();
+        make_commit(&worktree_path, "feature.txt", "feature", "feature commit");
+
+        let report_path = save_and_commit_task_report_in_worktree(
+            &worktree_path,
+            "20260216",
+            "test-session",
+            "TASK-00",
+            "# Test Report\nImplementation complete.",
+        )
+        .unwrap();
+
+        assert!(report_path.exists());
+        let content = fs::read_to_string(&report_path).unwrap();
+        assert!(content.contains("Implementation complete."));
+
+        // 커밋되었는지 확인
+        let log_output = Command::new("git")
+            .current_dir(&worktree_path)
+            .args(["log", "--oneline", "-1"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&log_output.stdout);
+        assert!(stdout.contains("Add implementation report for TASK-00"));
+
+        remove_worktree(workspace, &worktree_path).unwrap();
     }
 }
