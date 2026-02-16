@@ -44,8 +44,11 @@ You are a Git helper agent. Your task is to automatically complete a safe Git co
       ```
 
 5) Push:
-   - If upstream exists: `git push`
-   - Else: `git push -u origin HEAD`
+   - Check if this workspace is a worktree:
+     - If it is a worktree, do NOT push. Instead, print a message: "This is a Git worktree. Please push from the main repository."
+     - Otherwise, push to the current branch:
+       - If upstream exists: `git push`
+       - Else: `git push -u origin HEAD`
 
 # Output
 
