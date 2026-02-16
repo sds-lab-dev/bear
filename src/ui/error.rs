@@ -5,4 +5,7 @@ pub enum UiError {
         #[from]
         source: std::io::Error,
     },
+
+    #[error("Agent error: {message}")]
+    AgentError { message: String },
 }

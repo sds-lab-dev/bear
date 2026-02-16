@@ -90,5 +90,11 @@ pub fn run(config: Config) -> Result<(), UiError> {
     )?;
     terminal::disable_raw_mode()?;
 
+    if let Some(message) = app.fatal_error() {
+        return Err(UiError::AgentError {
+            message: message.to_string(),
+        });
+    }
+
     Ok(())
 }

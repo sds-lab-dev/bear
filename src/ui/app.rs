@@ -87,6 +87,7 @@ pub struct App {
     session_date_dir: Option<String>,
     coding_state: Option<CodingPhaseState>,
     pending_coding_report: Option<String>,
+    fatal_error: Option<String>,
 }
 
 impl App {
@@ -129,7 +130,12 @@ impl App {
             session_date_dir: None,
             coding_state: None,
             pending_coding_report: None,
+            fatal_error: None,
         })
+    }
+
+    pub fn fatal_error(&self) -> Option<&str> {
+        self.fatal_error.as_deref()
     }
 
     pub fn handle_key_event(&mut self, key_event: KeyEvent) {
@@ -520,7 +526,8 @@ impl App {
 
     fn handle_agent_error(&mut self, error_message: String) {
         self.add_system_message(&format!("에이전트 오류: {}", error_message));
-        self.input_mode = InputMode::Done;
+        self.fatal_error = Some(error_message);
+        self.should_quit = true;
     }
 
     fn start_spec_writing_query(&mut self, is_initial: bool) {
@@ -1126,11 +1133,14 @@ impl App {
             "IMPLEMENTATION_BLOCKED\n---\nAgent error: {}",
             error_message,
         );
+        let message = format!("Task [{}] error: {}", task_id, error_message);
         self.save_and_advance_task(
             task_id,
             CodingTaskStatus::ImplementationBlocked,
             report,
         );
+        self.fatal_error = Some(message);
+        self.should_quit = true;
     }
 
     fn cleanup_current_task_worktree(&mut self) {
