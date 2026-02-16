@@ -1472,6 +1472,7 @@ impl App {
                 &spec_path,
                 &plan_path,
                 &upstream_report_paths,
+                &integration_branch,
             );
 
             let request = ClaudeCodeRequest {
@@ -1702,8 +1703,9 @@ impl App {
         let spec_path = journal_dir.join("spec.md");
         let plan_path = journal_dir.join("plan.md");
 
+        let integration_branch = coding_state.integration_branch.clone();
         let user_prompt = coding::build_coding_revision_prompt(
-            &task, &spec_path, &plan_path, &review_comment,
+            &task, &spec_path, &plan_path, &review_comment, &integration_branch,
         );
 
         let mut client = match self.review_state.as_mut().unwrap().coding_client.take() {

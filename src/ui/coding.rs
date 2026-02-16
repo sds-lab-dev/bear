@@ -542,8 +542,8 @@ You MUST decide on one of the following status markers based on your implementat
 <<<
 # Metadata
 - Workspace: <path of the workspace>
-- Base Branch: <branch name> (the branch that this worktree is based on)
-- Base Commit: <commit hash> (the commit that this worktree is based on)
+- Base Branch: <use the integration branch name provided in the task context>
+- Base Commit: <commit hash> (<commit subject>) (obtain via `git merge-base HEAD <Base Branch>` in the worktree)
 
 # Task Summary
 - Describe the specific task you implemented in this session.
@@ -646,13 +646,19 @@ You MUST read following files for context before writing code:
 - Plan:
   - {{PLAN_PATH}}
 - Implementation reports for upstream tasks (if available):
-  - {{UPSTREAM_REPORT_PATHS}}"#;
+  - {{UPSTREAM_REPORT_PATHS}}
+
+---
+
+Worktree context:
+- Integration Branch: {{INTEGRATION_BRANCH}}"#;
 
 pub fn build_coding_task_prompt(
     task: &CodingTask,
     spec_path: &Path,
     plan_path: &Path,
     upstream_report_paths: &[PathBuf],
+    integration_branch: &str,
 ) -> String {
     let upstream_section = if upstream_report_paths.is_empty() {
         "  - N/A".to_string()
@@ -671,6 +677,7 @@ pub fn build_coding_task_prompt(
         .replace("{{SPEC_PATH}}", &spec_path.display().to_string())
         .replace("{{PLAN_PATH}}", &plan_path.display().to_string())
         .replace("{{UPSTREAM_REPORT_PATHS}}", &upstream_section)
+        .replace("{{INTEGRATION_BRANCH}}", integration_branch)
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,6 +1049,11 @@ You MUST read following files for context before making changes:
 - Plan:
   - {{PLAN_PATH}}
 
+---
+
+Worktree context:
+- Integration Branch: {{INTEGRATION_BRANCH}}
+
 Instructions:
 1. Carefully read the review feedback above.
 2. Address each point raised by the reviewer.
@@ -1056,6 +1068,7 @@ pub fn build_coding_revision_prompt(
     spec_path: &Path,
     plan_path: &Path,
     review_comment: &str,
+    integration_branch: &str,
 ) -> String {
     CODING_REVISION_PROMPT_TEMPLATE
         .replace("{{TASK_ID}}", &task.task_id)
@@ -1063,6 +1076,7 @@ pub fn build_coding_revision_prompt(
         .replace("{{SPEC_PATH}}", &spec_path.display().to_string())
         .replace("{{PLAN_PATH}}", &plan_path.display().to_string())
         .replace("{{REVIEW_COMMENT}}", review_comment)
+        .replace("{{INTEGRATION_BRANCH}}", integration_branch)
 }
 
 // ---------------------------------------------------------------------------
@@ -1596,7 +1610,14 @@ mod tests {
         let plan_path = Path::new("/workspace/.bear/20260215/session/plan.md");
         let upstream_paths = vec![PathBuf::from("/workspace/.bear/20260215/session/TASK-01.md")];
 
-        let prompt = build_coding_task_prompt(&task, spec_path, plan_path, &upstream_paths);
+        let integration_branch = "bear/integration/test-session-abc123";
+        let prompt = build_coding_task_prompt(
+            &task,
+            spec_path,
+            plan_path,
+            &upstream_paths,
+            integration_branch,
+        );
 
         assert!(prompt.contains("TASK-00"));
         assert!(prompt.contains("기본 타입 정의"));
@@ -1604,6 +1625,7 @@ mod tests {
         assert!(prompt.contains(&spec_path.display().to_string()));
         assert!(prompt.contains(&plan_path.display().to_string()));
         assert!(prompt.contains("TASK-01.md"));
+        assert!(prompt.contains(integration_branch));
     }
 
     #[test]
@@ -1617,7 +1639,8 @@ mod tests {
 
         let spec_path = Path::new("/workspace/.bear/spec.md");
         let plan_path = Path::new("/workspace/.bear/plan.md");
-        let prompt = build_coding_task_prompt(&task, spec_path, plan_path, &[]);
+        let prompt =
+            build_coding_task_prompt(&task, spec_path, plan_path, &[], "bear/integration/test");
 
         assert!(prompt.contains("N/A"));
     }
@@ -2286,6 +2309,7 @@ mod tests {
             Path::new("/workspace/.bear/spec.md"),
             Path::new("/workspace/.bear/plan.md"),
             "에러 핸들링을 추가해주세요.",
+            "bear/integration/test-session-xyz",
         );
 
         assert!(prompt.contains("에러 핸들링을 추가해주세요."));
