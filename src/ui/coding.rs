@@ -1394,6 +1394,27 @@ pub fn get_latest_commit_revision(worktree_path: &Path) -> Result<String, String
 // Report Management
 // ---------------------------------------------------------------------------
 
+pub fn copy_artifacts_to_worktree(
+    source_dir: &Path,
+    target_dir: &Path,
+    file_names: &[&str],
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Err(err) = fs::create_dir_all(target_dir) {
+        errors.push(format!("디렉토리 생성 실패: {}", err));
+        return errors;
+    }
+    for name in file_names {
+        let src = source_dir.join(name);
+        if src.exists()
+            && let Err(err) = fs::copy(&src, target_dir.join(name))
+        {
+            errors.push(format!("{} 복사 실패: {}", name, err));
+        }
+    }
+    errors
+}
+
 pub fn save_task_report(
     dir: &Path,
     task_id: &str,

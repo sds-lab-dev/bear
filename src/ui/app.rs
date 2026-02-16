@@ -97,7 +97,7 @@ pub struct App {
     spec_revision_instructions_sent: bool,
     session_name: Option<String>,
     session_date_dir: Option<String>,
-    journal_dir: Option<PathBuf>,
+    base_journal_dir: Option<PathBuf>,
     coding_state: Option<CodingPhaseState>,
     pending_coding_report: Option<String>,
     review_state: Option<ReviewState>,
@@ -171,7 +171,7 @@ impl App {
             spec_revision_instructions_sent: false,
             session_name: None,
             session_date_dir: None,
-            journal_dir: None,
+            base_journal_dir: None,
             coding_state: None,
             pending_coding_report: None,
             review_state: None,
@@ -273,10 +273,10 @@ impl App {
         loop {
             match receiver.try_recv() {
                 Ok(AgentStreamMessage::SessionName { name, date_dir }) => {
-                    if self.journal_dir.is_none()
+                    if self.base_journal_dir.is_none()
                         && let Some(ws) = &self.confirmed_workspace
                     {
-                        self.journal_dir =
+                        self.base_journal_dir =
                             Some(ws.join(".bear").join(&date_dir).join(&name));
                     }
                     let journal_dir = self.journal_dir();
@@ -377,7 +377,17 @@ impl App {
     }
 
     fn journal_dir(&self) -> PathBuf {
-        if let Some(dir) = &self.journal_dir {
+        if let Some(coding_state) = &self.coding_state
+            && let Some(worktree_info) = &coding_state.current_task_worktree
+            && let (Some(date), Some(name)) = (&self.session_date_dir, &self.session_name)
+        {
+            return worktree_info.worktree_path.join(".bear").join(date).join(name);
+        }
+        self.workspace_journal_dir()
+    }
+
+    fn workspace_journal_dir(&self) -> PathBuf {
+        if let Some(dir) = &self.base_journal_dir {
             return dir.clone();
         }
         match (&self.confirmed_workspace, &self.session_date_dir, &self.session_name) {
@@ -1415,6 +1425,16 @@ impl App {
             task_branch,
         });
 
+        let worktree_journal = self.journal_dir();
+        let workspace_journal = self.workspace_journal_dir();
+        for err in coding::copy_artifacts_to_worktree(
+            &workspace_journal,
+            &worktree_journal,
+            &["spec.md", "plan.md"],
+        ) {
+            self.add_system_message(&err);
+        }
+
         let journal_dir = self.journal_dir();
         let spec_path = journal_dir.join("spec.md");
         let plan_path = journal_dir.join("plan.md");
@@ -1557,18 +1577,8 @@ impl App {
             }
         };
 
-        let spec_path = match (&self.confirmed_workspace, &self.session_date_dir, &self.session_name) {
-            (Some(ws), Some(date), Some(name)) => {
-                ws.join(".bear").join(date).join(name).join("spec.md")
-            }
-            _ => PathBuf::new(),
-        };
-        let plan_path = match (&self.confirmed_workspace, &self.session_date_dir, &self.session_name) {
-            (Some(ws), Some(date), Some(name)) => {
-                ws.join(".bear").join(date).join(name).join("plan.md")
-            }
-            _ => PathBuf::new(),
-        };
+        let spec_path = journal_dir.join("spec.md");
+        let plan_path = journal_dir.join("plan.md");
 
         let user_prompt = if is_followup {
             coding::build_followup_review_prompt(
@@ -1688,18 +1698,9 @@ impl App {
         let worktree_path = worktree_info.worktree_path.clone();
         let task_id = task.task_id.clone();
 
-        let spec_path = match (&self.confirmed_workspace, &self.session_date_dir, &self.session_name) {
-            (Some(ws), Some(date), Some(name)) => {
-                ws.join(".bear").join(date).join(name).join("spec.md")
-            }
-            _ => PathBuf::new(),
-        };
-        let plan_path = match (&self.confirmed_workspace, &self.session_date_dir, &self.session_name) {
-            (Some(ws), Some(date), Some(name)) => {
-                ws.join(".bear").join(date).join(name).join("plan.md")
-            }
-            _ => PathBuf::new(),
-        };
+        let journal_dir = self.journal_dir();
+        let spec_path = journal_dir.join("spec.md");
+        let plan_path = journal_dir.join("plan.md");
 
         let user_prompt = coding::build_coding_revision_prompt(
             &task, &spec_path, &plan_path, &review_comment,
@@ -2163,12 +2164,14 @@ impl App {
             task_id,
         ));
 
-        let workspace = self.confirmed_workspace.clone().unwrap();
-        let report_file_path = workspace
-            .join(".bear")
-            .join(&date_dir)
-            .join(&session_name)
-            .join(format!("{}.md", task_id));
+        let workspace_journal = self.workspace_journal_dir();
+        if let Err(err) = coding::save_task_report(&workspace_journal, &task_id, &report) {
+            self.add_system_message(&format!(
+                "[{}] 워크스페이스 리포트 저장 실패: {}",
+                task_id, err,
+            ));
+        }
+        let report_file_path = workspace_journal.join(format!("{}.md", task_id));
 
         match coding::fast_forward_merge_task_branch(
             &worktree_path,
