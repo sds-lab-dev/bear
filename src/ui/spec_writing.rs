@@ -62,7 +62,10 @@ IMPORTANT:
 - The spec MUST be testable with clear acceptance criteria.
 - Inspect the workspace using available tools to understand existing code context.
 - Write the spec in Korean.
-- The current working directory (CWD) of this process is the workspace root. When referencing file paths in the spec, use paths relative to the workspace root. Do NOT embed absolute paths derived from the current environment. The coding agent that implements this spec will have its own CWD set as the workspace root, so relative paths will resolve correctly.
+- This spec MUST be workspace-root relative if it references any file paths. 
+  - Do NOT use absolute paths or environment-specific paths. 
+  - Instead, for example, use `src/main.rs` instead of `/workspace/src/main.rs`. 
+  - Coding agents, which implement this spec, execute tasks in isolated worktrees. Each coding agent's workspace root differs per task, but relative paths in this spec MUST resolve correctly from that agent's workspace root.
 
 ---
 
