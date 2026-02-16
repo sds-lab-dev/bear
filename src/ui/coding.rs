@@ -978,11 +978,10 @@ fn run_shell_command(
     })
 }
 
-pub fn squash_merge_task_branch(
+pub fn fast_forward_merge_task_branch(
     worktree_path: &Path,
     integration_branch: &str,
     task_branch: &str,
-    commit_message: &str,
 ) -> Result<(), String> {
     let checkout_output = Command::new("git")
         .current_dir(worktree_path)
@@ -1000,24 +999,13 @@ pub fn squash_merge_task_branch(
 
     let merge_output = Command::new("git")
         .current_dir(worktree_path)
-        .args(["merge", "--squash", task_branch])
+        .args(["merge", "--ff-only", task_branch])
         .output()
-        .map_err(|e| format!("failed to execute git merge --squash: {}", e))?;
+        .map_err(|e| format!("failed to execute git merge --ff-only: {}", e))?;
 
     if !merge_output.status.success() {
         let stderr = String::from_utf8_lossy(&merge_output.stderr);
-        return Err(format!("failed to squash merge: {}", stderr.trim()));
-    }
-
-    let commit_output = Command::new("git")
-        .current_dir(worktree_path)
-        .args(["commit", "-m", commit_message])
-        .output()
-        .map_err(|e| format!("failed to execute git commit: {}", e))?;
-
-    if !commit_output.status.success() {
-        let stderr = String::from_utf8_lossy(&commit_output.stderr);
-        return Err(format!("failed to commit squash merge: {}", stderr.trim()));
+        return Err(format!("failed to fast-forward merge: {}", stderr.trim()));
     }
 
     Ok(())
@@ -1447,7 +1435,7 @@ mod tests {
     }
 
     #[test]
-    fn squash_merge_task_branch_success() {
+    fn fast_forward_merge_task_branch_success() {
         let temp_dir = TempDir::new().unwrap();
         let workspace = temp_dir.path();
         init_git_repo(workspace);
@@ -1462,15 +1450,14 @@ mod tests {
 
         rebase_onto_integration(&worktree_path, &integration).unwrap();
 
-        squash_merge_task_branch(
+        fast_forward_merge_task_branch(
             &worktree_path,
             &integration,
             &task_branch,
-            "[TASK-00] Test squash merge",
         )
         .unwrap();
 
-        // 통합 브랜치에 스퀘시 커밋이 1개 존재하는지 확인
+        // fast-forward 머지 후 태스크 브랜치의 커밋들이 그대로 통합 브랜치에 존재하는지 확인
         let log_output = Command::new("git")
             .current_dir(&worktree_path)
             .args(["log", "--oneline", &format!("{}..HEAD", "main")])
@@ -1478,8 +1465,9 @@ mod tests {
             .unwrap();
         let stdout = String::from_utf8_lossy(&log_output.stdout);
         let commit_lines: Vec<&str> = stdout.lines().collect();
-        assert_eq!(commit_lines.len(), 1);
-        assert!(commit_lines[0].contains("[TASK-00]"));
+        assert_eq!(commit_lines.len(), 2);
+        assert!(commit_lines[0].contains("feature2 commit"));
+        assert!(commit_lines[1].contains("feature commit"));
 
         remove_worktree(workspace, &worktree_path).unwrap();
     }

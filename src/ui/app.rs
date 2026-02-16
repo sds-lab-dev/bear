@@ -99,7 +99,6 @@ pub struct App {
 
 struct PendingBuildTest {
     task_id: String,
-    task_title: String,
     report: String,
     is_retry: bool,
 }
@@ -1136,10 +1135,11 @@ impl App {
     }
 
     fn handle_coding_task_result(&mut self, result: CodingTaskResult) {
-        let (task_id, task_title) = {
+        let task_id = {
             let coding_state = self.coding_state.as_ref().unwrap();
-            let task = &coding_state.tasks[coding_state.current_task_index];
-            (task.task_id.clone(), task.title.clone())
+            coding_state.tasks[coding_state.current_task_index]
+                .task_id
+                .clone()
         };
 
         let status_label = match &result.status {
@@ -1157,13 +1157,12 @@ impl App {
             return;
         }
 
-        self.rebase_and_merge_task(task_id, task_title, result.report);
+        self.rebase_and_merge_task(task_id, result.report);
     }
 
     fn rebase_and_merge_task(
         &mut self,
         task_id: String,
-        task_title: String,
         report: String,
     ) {
         let coding_state = self.coding_state.as_ref().unwrap();
@@ -1179,7 +1178,7 @@ impl App {
         match coding::rebase_onto_integration(&worktree_path, &integration_branch) {
             Ok(RebaseOutcome::Success) => {
                 self.add_system_message(&format!("[{}] 리베이스 성공.", task_id));
-                self.verify_build_and_test(task_id, task_title, report);
+                self.verify_build_and_test(task_id, report);
             }
             Ok(RebaseOutcome::Conflict { conflicted_files }) => {
                 self.add_system_message(&format!(
@@ -1250,7 +1249,6 @@ impl App {
     fn verify_build_and_test(
         &mut self,
         task_id: String,
-        task_title: String,
         report: String,
     ) {
         let worktree_path = self
@@ -1281,23 +1279,21 @@ impl App {
                 self.add_system_message(
                     "빌드 시스템을 자동 감지할 수 없습니다. 빌드 명령어를 입력해주세요:",
                 );
-                self.ask_build_command(task_id, task_title, report);
+                self.ask_build_command(task_id, report);
                 return;
             }
         }
 
-        self.start_build_test_execution(task_id, task_title, report, false);
+        self.start_build_test_execution(task_id, report, false);
     }
 
     fn ask_build_command(
         &mut self,
         task_id: String,
-        task_title: String,
         report: String,
     ) {
         self.pending_build_test = Some(PendingBuildTest {
             task_id,
-            task_title,
             report,
             is_retry: false,
         });
@@ -1335,7 +1331,6 @@ impl App {
                 let pending = self.pending_build_test.take().unwrap();
                 self.start_build_test_execution(
                     pending.task_id,
-                    pending.task_title,
                     pending.report,
                     pending.is_retry,
                 );
@@ -1346,7 +1341,6 @@ impl App {
     fn start_build_test_execution(
         &mut self,
         task_id: String,
-        task_title: String,
         report: String,
         is_retry: bool,
     ) {
@@ -1374,7 +1368,6 @@ impl App {
 
         self.pending_build_test = Some(PendingBuildTest {
             task_id,
-            task_title,
             report,
             is_retry,
         });
@@ -1405,9 +1398,8 @@ impl App {
                     "[{}] 빌드/테스트 검증 성공.",
                     pending.task_id,
                 ));
-                self.squash_merge_and_advance(
+                self.ff_merge_and_advance(
                     pending.task_id,
-                    pending.task_title,
                     pending.report,
                 );
             }
@@ -1444,7 +1436,6 @@ impl App {
             ));
             self.start_build_test_repair(
                 pending.task_id,
-                pending.task_title,
                 pending.report,
                 output,
             );
@@ -1454,13 +1445,11 @@ impl App {
     fn start_build_test_repair(
         &mut self,
         task_id: String,
-        task_title: String,
         report: String,
         error_output: String,
     ) {
         self.pending_build_test = Some(PendingBuildTest {
             task_id: task_id.clone(),
-            task_title,
             report,
             is_retry: true,
         });
@@ -1534,7 +1523,6 @@ impl App {
                 ));
                 self.start_build_test_execution(
                     pending.task_id,
-                    pending.task_title,
                     pending.report,
                     true,
                 );
@@ -1557,10 +1545,9 @@ impl App {
         }
     }
 
-    fn squash_merge_and_advance(
+    fn ff_merge_and_advance(
         &mut self,
         task_id: String,
-        task_title: String,
         report: String,
     ) {
         let coding_state = self.coding_state.as_ref().unwrap();
@@ -1568,21 +1555,19 @@ impl App {
         let worktree_path = worktree_info.worktree_path.clone();
         let task_branch = worktree_info.task_branch.clone();
         let integration_branch = coding_state.integration_branch.clone();
-        let commit_message = format!("[{}] {}", task_id, task_title);
 
         self.add_system_message(&format!(
-            "[{}] 통합 브랜치로 스퀘시 머지 시작...",
+            "[{}] 통합 브랜치로 fast-forward 머지 시작...",
             task_id,
         ));
 
-        match coding::squash_merge_task_branch(
+        match coding::fast_forward_merge_task_branch(
             &worktree_path,
             &integration_branch,
             &task_branch,
-            &commit_message,
         ) {
             Ok(()) => {
-                self.add_system_message(&format!("[{}] 스퀘시 머지 완료.", task_id));
+                self.add_system_message(&format!("[{}] fast-forward 머지 완료.", task_id));
                 self.cleanup_current_task_worktree();
                 self.save_and_advance_task(
                     task_id,
@@ -1591,12 +1576,15 @@ impl App {
                 );
             }
             Err(err) => {
-                self.add_system_message(&format!("[{}] 스퀘시 머지 실패: {}", task_id, err));
+                self.add_system_message(&format!(
+                    "[{}] fast-forward 머지 실패: {}",
+                    task_id, err
+                ));
                 self.cleanup_current_task_worktree();
                 self.save_and_advance_task(
                     task_id,
                     CodingTaskStatus::ImplementationBlocked,
-                    format!("{}\n\n---\n스퀘시 머지 실패: {}", report, err),
+                    format!("{}\n\n---\nfast-forward 머지 실패: {}", report, err),
                 );
             }
         }
@@ -1675,10 +1663,11 @@ impl App {
     }
 
     fn handle_conflict_resolution_result(&mut self, result: ConflictResolutionResult) {
-        let (task_id, task_title) = {
+        let task_id = {
             let coding_state = self.coding_state.as_ref().unwrap();
-            let task = &coding_state.tasks[coding_state.current_task_index];
-            (task.task_id.clone(), task.title.clone())
+            coding_state.tasks[coding_state.current_task_index]
+                .task_id
+                .clone()
         };
 
         match result.status {
@@ -1688,7 +1677,7 @@ impl App {
                     .pending_coding_report
                     .take()
                     .unwrap_or(result.report);
-                self.verify_build_and_test(task_id, task_title, report);
+                self.verify_build_and_test(task_id, report);
             }
             ConflictResolutionStatus::ConflictResolutionFailed => {
                 self.add_system_message(&format!(
