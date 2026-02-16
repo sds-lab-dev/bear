@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Instant;
+use std::io::Write;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -104,6 +105,7 @@ pub struct App {
     imported_spec_path: Option<PathBuf>,
     imported_plan_path: Option<PathBuf>,
     pending_validation_kind: Option<FileKind>,
+    pub pending_external_editor: bool,
 }
 
 struct PendingBuildTest {
@@ -165,6 +167,7 @@ impl App {
             imported_spec_path: None,
             imported_plan_path: None,
             pending_validation_kind: None,
+            pending_external_editor: false,
         })
     }
 
@@ -393,23 +396,23 @@ impl App {
             | InputMode::SpecClarificationAnswer
             | InputMode::PlanClarificationAnswer => {
                 if self.keyboard_enhancement_enabled {
-                    "[Enter] Submit  [Shift+Enter] New line  [Esc] Quit"
+                    "[Enter] Submit  [Shift+Enter] New line  [Ctrl+G] Editor  [Esc] Quit"
                 } else {
-                    "[Enter] Submit  [Alt+Enter] New line  [Esc] Quit"
+                    "[Enter] Submit  [Alt+Enter] New line  [Ctrl+G] Editor  [Esc] Quit"
                 }
             }
             InputMode::SpecFeedback | InputMode::PlanFeedback => {
                 if self.keyboard_enhancement_enabled {
-                    "[Enter] Submit feedback  [Ctrl+A] Approve  [Shift+Enter] New line  [Esc] Quit"
+                    "[Enter] Submit feedback  [Ctrl+A] Approve  [Shift+Enter] New line  [Ctrl+G] Editor  [Esc] Quit"
                 } else {
-                    "[Enter] Submit feedback  [Ctrl+A] Approve  [Alt+Enter] New line  [Esc] Quit"
+                    "[Enter] Submit feedback  [Ctrl+A] Approve  [Alt+Enter] New line  [Ctrl+G] Editor  [Esc] Quit"
                 }
             }
             InputMode::BuildTestCommandInput => {
                 if self.keyboard_enhancement_enabled {
-                    "[Enter] Submit  [Shift+Enter] New line  [Esc] Quit"
+                    "[Enter] Submit  [Shift+Enter] New line  [Ctrl+G] Editor  [Esc] Quit"
                 } else {
-                    "[Enter] Submit  [Alt+Enter] New line  [Esc] Quit"
+                    "[Enter] Submit  [Alt+Enter] New line  [Ctrl+G] Editor  [Esc] Quit"
                 }
             }
             InputMode::AgentThinking | InputMode::Coding | InputMode::Done => "[Esc] Quit",
@@ -479,6 +482,9 @@ impl App {
             }
             KeyCode::Esc => {
                 self.should_quit = true;
+            }
+            KeyCode::Char('g') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.pending_external_editor = true;
             }
             KeyCode::Char(c) => {
                 self.insert_char_at_cursor(c);
@@ -2149,6 +2155,66 @@ impl App {
         ));
 
         self.input_mode = InputMode::Done;
+    }
+
+    pub fn open_external_editor(&mut self) {
+        self.pending_external_editor = false;
+
+        let temp_path = std::env::temp_dir().join(
+            format!("bear-input-{}.md", uuid::Uuid::new_v4()),
+        );
+
+        if let Err(err) = std::fs::File::create(&temp_path)
+            .and_then(|mut f| f.write_all(self.input_buffer.as_bytes()))
+        {
+            self.add_system_message(&format!("임시 파일 생성 실패: {}", err));
+            return;
+        }
+
+        let editor_command = std::env::var("EDITOR").unwrap_or_else(|_| "code --wait".to_string());
+        let parts: Vec<&str> = editor_command.split_whitespace().collect();
+        let (program, args) = match parts.split_first() {
+            Some((prog, rest)) => (*prog, rest),
+            None => {
+                self.add_system_message("EDITOR 환경변수가 비어 있습니다.");
+                let _ = std::fs::remove_file(&temp_path);
+                return;
+            }
+        };
+
+        let status = std::process::Command::new(program)
+            .args(args)
+            .arg(&temp_path)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status();
+
+        match status {
+            Ok(exit_status) if exit_status.success() => {
+                match std::fs::read_to_string(&temp_path) {
+                    Ok(content) => {
+                        self.input_buffer = content;
+                        self.cursor_position = self.input_buffer.chars().count();
+                    }
+                    Err(err) => {
+                        self.add_system_message(
+                            &format!("임시 파일 읽기 실패: {}", err),
+                        );
+                    }
+                }
+            }
+            Ok(_) => {
+                self.add_system_message("에디터가 비정상 종료되었습니다.");
+            }
+            Err(err) => {
+                self.add_system_message(
+                    &format!("에디터 실행 실패: {} (command: {})", err, editor_command),
+                );
+            }
+        }
+
+        let _ = std::fs::remove_file(&temp_path);
     }
 
     fn is_newline_modifier(&self, modifiers: KeyModifiers) -> bool {

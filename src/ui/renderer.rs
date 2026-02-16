@@ -61,6 +61,15 @@ impl TerminalWriter {
         self.terminal_width = new_width;
     }
 
+    pub fn reset_for_redraw(&mut self) {
+        self.live_area_line_count = 0;
+        self.cursor_lines_above_bottom = 0;
+        self.committed_message_count = 0;
+        self.banner_committed = false;
+        let (width, _) = terminal::size().unwrap_or((self.terminal_width, 24));
+        self.terminal_width = width;
+    }
+
     pub fn finalize(&mut self) -> Result<(), std::io::Error> {
         self.erase_live_area()?;
         queue!(self.stdout, style::Print("\r\n"))?;

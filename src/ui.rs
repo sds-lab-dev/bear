@@ -72,6 +72,41 @@ pub fn run(config: Config) -> Result<(), UiError> {
             }
         }
 
+        if app.pending_external_editor {
+            // 터미널 상태 복원
+            writer.finalize()?;
+            if keyboard_enhancement_enabled {
+                crossterm::execute!(stdout(), PopKeyboardEnhancementFlags)?;
+            }
+            crossterm::execute!(
+                stdout(),
+                cursor::Show,
+                cursor::SetCursorStyle::DefaultUserShape,
+                DisableBracketedPaste,
+            )?;
+            terminal::disable_raw_mode()?;
+
+            app.open_external_editor();
+
+            // 터미널 상태 재설정
+            terminal::enable_raw_mode()?;
+            crossterm::execute!(
+                stdout(),
+                EnableBracketedPaste,
+                cursor::Hide,
+                cursor::SetCursorStyle::SteadyBlock,
+            )?;
+            if keyboard_enhancement_enabled {
+                crossterm::execute!(
+                    stdout(),
+                    PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+                )?;
+            }
+
+            writer.reset_for_redraw();
+            app.terminal_width = writer.terminal_width();
+        }
+
         if app.should_quit {
             break;
         }
