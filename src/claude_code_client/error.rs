@@ -15,12 +15,6 @@ pub enum ClaudeCodeClientError {
     #[error("CLI returned an error: {message}")]
     CliReturnedError { message: String },
 
-    #[error("failed to create directory {path}: {source}")]
-    DirectoryCreationFailed {
-        path: String,
-        source: std::io::Error,
-    },
-
     #[error("failed to write system prompt to temp file: {source}")]
     SystemPromptFileWriteFailed { source: std::io::Error },
 

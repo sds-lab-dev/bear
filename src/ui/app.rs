@@ -916,7 +916,7 @@ impl App {
         let workspace = self.confirmed_workspace.clone().unwrap();
         let client = ClaudeCodeClient::new(
             self.config.api_key().to_string(),
-            vec![workspace],
+            workspace,
             Some(clarification::system_prompt().to_string()),
         )
             .map_err(|err| err.to_string())?;
@@ -1434,7 +1434,7 @@ impl App {
 
         let mut client = match ClaudeCodeClient::new(
             api_key,
-            vec![worktree_path.clone()],
+            worktree_path,
             Some(coding::coding_agent_system_prompt().to_string()),
         ) {
             Ok(c) => c,
@@ -1452,7 +1452,6 @@ impl App {
                 return;
             }
         };
-        client.set_working_directory(worktree_path);
 
         let (sender, receiver) = mpsc::channel();
         self.agent_result_receiver = Some(receiver);
@@ -1599,13 +1598,10 @@ impl App {
             None => {
                 match ClaudeCodeClient::new(
                     api_key,
-                    vec![worktree_path.clone()],
+                    worktree_path.clone(),
                     Some(coding::review_agent_system_prompt().to_string()),
                 ) {
-                    Ok(mut c) => {
-                        c.set_working_directory(worktree_path.clone());
-                        c
-                    }
+                    Ok(c) => c,
                     Err(err) => {
                         self.add_system_message(&format!(
                             "[{}] 리뷰 에이전트 클라이언트 생성 실패: {}. 리뷰 건너뜀.",

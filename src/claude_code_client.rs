@@ -86,9 +86,8 @@ fn parse_cli_output<T: DeserializeOwned>(
 pub struct ClaudeCodeClient {
     binary_path: PathBuf,
     api_key: String,
-    additional_work_directories: Vec<PathBuf>,
     session_id: Option<String>,
-    working_directory: Option<PathBuf>,
+    working_directory: PathBuf,
     system_prompt: Option<String>,
     pending_system_prompt: Option<String>,
 }
@@ -103,7 +102,7 @@ impl ClaudeCodeClient {
     }
 
     pub fn set_working_directory(&mut self, path: PathBuf) {
-        self.working_directory = Some(path);
+        self.working_directory = path;
     }
 
     pub fn set_system_prompt(&mut self, prompt: Option<String>) {
@@ -116,28 +115,16 @@ impl ClaudeCodeClient {
 
     pub fn new(
         api_key: String,
-        additional_work_directories: Vec<PathBuf>,
+        working_directory: PathBuf,
         system_prompt: Option<String>,
     ) -> Result<Self, ClaudeCodeClientError> {
         let binary_path = binary_finder::find_claude_binary()?;
 
-        for directory in &additional_work_directories {
-            if !directory.exists() {
-                std::fs::create_dir_all(directory).map_err(|err| {
-                    ClaudeCodeClientError::DirectoryCreationFailed {
-                        path: directory.display().to_string(),
-                        source: err,
-                    }
-                })?;
-            }
-        }
-
         Ok(Self {
             binary_path,
             api_key,
-            additional_work_directories,
             session_id: None,
-            working_directory: None,
+            working_directory,
             system_prompt,
             pending_system_prompt: None,
         })
@@ -150,11 +137,8 @@ impl ClaudeCodeClient {
 
         let mut command = Command::new(&self.binary_path);
 
-        if let Some(dir) = &self.working_directory {
-            command.current_dir(dir);
-        }
-
         command
+            .current_dir(&self.working_directory)
             .env("ANTHROPIC_API_KEY", &self.api_key)
             .env("CLAUDE_CODE_EFFORT_LEVEL", model_effort_level)
             .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", disable_auto_memory)
@@ -176,13 +160,6 @@ impl ClaudeCodeClient {
                 Some(id)
             }
         };
-
-        if !self.additional_work_directories.is_empty() {
-            command.arg("--add-dir");
-            for directory in &self.additional_work_directories {
-                command.arg(directory);
-            }
-        }
 
         command.arg("--model").arg("claude-opus-4-6");
 
@@ -234,10 +211,7 @@ impl ClaudeCodeClient {
         let log = |msg: String| logger::write_log(loc, &msg);
 
         log(format!("[{}] 바이너리: {}", mode, self.binary_path.display()));
-
-        if let Some(dir) = &self.working_directory {
-            log(format!("[{}] 작업 디렉토리: {}", mode, dir.display()));
-        }
+        log(format!("[{}] 작업 디렉토리: {}", mode, self.working_directory.display()));
 
         log(format!(
             "[{}] 환경 변수: ANTHROPIC_API_KEY=***, \
@@ -261,19 +235,6 @@ impl ClaudeCodeClient {
             ),
         };
         log(format!("[{}] 세션: {}", mode, session_info));
-
-        if !self.additional_work_directories.is_empty() {
-            let dirs: Vec<String> = self
-                .additional_work_directories
-                .iter()
-                .map(|d| d.display().to_string())
-                .collect();
-            log(format!(
-                "[{}] 추가 작업 디렉토리 (--add-dir): {}",
-                mode,
-                dirs.join(" "),
-            ));
-        }
 
         log(format!("[{}] 모델 (--model): claude-opus-4-6", mode));
 
