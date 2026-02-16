@@ -7,7 +7,7 @@ pub use error::ClaudeCodeClientError;
 pub use response::CliResponse;
 
 use std::path::PathBuf;
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 use std::process::{Command, Stdio};
 
 use serde::de::DeserializeOwned;
@@ -15,6 +15,23 @@ use serde::de::DeserializeOwned;
 const TOOLS_LIST: &str = "AskUserQuestion,Bash,TaskOutput,Edit,ExitPlanMode,Glob,Grep,\
     KillShell,MCPSearch,Read,Skill,Task,TaskCreate,TaskGet,TaskList,TaskUpdate,\
     WebFetch,WebSearch,Write,LSP";
+
+struct TempFileGuard(Option<PathBuf>);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+struct BaseCommandOutput {
+    command: Command,
+    new_session_id: Option<String>,
+    sent_system_prompt: Option<String>,
+    system_prompt_file: Option<PathBuf>,
+}
 
 pub struct ClaudeCodeRequest {
     pub user_prompt: String,
@@ -126,7 +143,7 @@ impl ClaudeCodeClient {
         })
     }
 
-    fn build_base_command(&mut self, request: &ClaudeCodeRequest) -> (Command, Option<String>, Option<String>) {
+    fn build_base_command(&mut self, request: &ClaudeCodeRequest) -> Result<BaseCommandOutput, ClaudeCodeClientError> {
         let model_effort_level = "high";
         let disable_auto_memory = "0";  // 0 = force enable.
         let disable_feedback_survey = "1";
@@ -178,18 +195,30 @@ impl ClaudeCodeClient {
         if let Some(sp) = self.pending_system_prompt.take() {
             prompt_parts.push(sp);
         }
-        let sent_system_prompt = if prompt_parts.is_empty() {
-            None
+        let (sent_system_prompt, system_prompt_file) = if prompt_parts.is_empty() {
+            (None, None)
         } else {
             let combined = prompt_parts.join("\n\n");
-            command.arg("--append-system-prompt").arg(&combined);
-            Some(combined)
+            let temp_path = std::env::temp_dir().join(format!(
+                "bear-system-prompt-{}.txt",
+                uuid::Uuid::new_v4(),
+            ));
+            std::fs::write(&temp_path, &combined).map_err(|source| {
+                ClaudeCodeClientError::SystemPromptFileWriteFailed { source }
+            })?;
+            command.arg("--append-system-prompt-file").arg(&temp_path);
+            (Some(combined), Some(temp_path))
         };
 
         let output_schema_string = request.output_schema.to_string();
         command.arg("--json-schema").arg(&output_schema_string);
 
-        (command, new_session_id, sent_system_prompt)
+        Ok(BaseCommandOutput {
+            command,
+            new_session_id,
+            sent_system_prompt,
+            system_prompt_file,
+        })
     }
 
     fn log_invocation_details(
@@ -199,6 +228,7 @@ impl ClaudeCodeClient {
         new_session_id: &Option<String>,
         extra_args: &[&str],
         sent_system_prompt: &Option<String>,
+        system_prompt_file: &Option<PathBuf>,
     ) {
         let loc = "ClaudeCodeClient::log_invocation_details";
         let log = |msg: String| logger::write_log(loc, &msg);
@@ -256,9 +286,14 @@ impl ClaudeCodeClient {
         }
 
         if let Some(system_prompt) = sent_system_prompt {
+            let file_path = system_prompt_file
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
             log(format!(
-                "[{}] 시스템 프롬프트 (--append-system-prompt, {} bytes):\n{}",
+                "[{}] 시스템 프롬프트 (--append-system-prompt-file {}, {} bytes):\n{}",
                 mode,
+                file_path,
                 system_prompt.len(),
                 system_prompt,
             ));
@@ -270,7 +305,7 @@ impl ClaudeCodeClient {
         ));
 
         log(format!(
-            "[{}] 사용자 프롬프트 ({} bytes):\n{}",
+            "[{}] 사용자 프롬프트 (stdin, {} bytes):\n{}",
             mode,
             request.user_prompt.len(),
             request.user_prompt,
@@ -281,9 +316,13 @@ impl ClaudeCodeClient {
         &mut self,
         request: &ClaudeCodeRequest,
     ) -> Result<T, ClaudeCodeClientError> {
-        let (mut command, new_session_id, sent_system_prompt) = self.build_base_command(request);
+        let BaseCommandOutput {
+            mut command,
+            new_session_id,
+            sent_system_prompt,
+            system_prompt_file,
+        } = self.build_base_command(request)?;
         command.arg("--output-format").arg("json");
-        command.arg(&request.user_prompt);
 
         crate::cli_log!("[비스트리밍 쿼리 시작]");
         self.log_invocation_details(
@@ -292,9 +331,28 @@ impl ClaudeCodeClient {
             &new_session_id,
             &["--output-format", "json"],
             &sent_system_prompt,
+            &system_prompt_file,
         );
+        let _temp_file_guard = TempFileGuard(system_prompt_file);
 
-        let output = command.output().map_err(|err| {
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|err| {
+            crate::cli_log!("[비스트리밍 쿼리 실패] 프로세스 생성 오류: {}", err);
+            ClaudeCodeClientError::CommandExecutionFailed {
+                message: err.to_string(),
+            }
+        })?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(request.user_prompt.as_bytes()).map_err(|err| {
+                crate::cli_log!("[비스트리밍 쿼리 실패] stdin 쓰기 오류: {}", err);
+                ClaudeCodeClientError::CommandExecutionFailed {
+                    message: format!("stdin 쓰기 실패: {}", err),
+                }
+            })?;
+        }
+
+        let output = child.wait_with_output().map_err(|err| {
             crate::cli_log!("[비스트리밍 쿼리 실패] 명령 실행 오류: {}", err);
             ClaudeCodeClientError::CommandExecutionFailed {
                 message: err.to_string(),
@@ -342,11 +400,15 @@ impl ClaudeCodeClient {
         T: DeserializeOwned,
         F: Fn(String),
     {
-        let (mut command, new_session_id, sent_system_prompt) = self.build_base_command(request);
+        let BaseCommandOutput {
+            mut command,
+            new_session_id,
+            sent_system_prompt,
+            system_prompt_file,
+        } = self.build_base_command(request)?;
         command.arg("--output-format").arg("stream-json");
         command.arg("--verbose");
         command.arg("--include-partial-messages");
-        command.arg(&request.user_prompt);
 
         crate::cli_log!("[스트리밍 쿼리 시작]");
         self.log_invocation_details(
@@ -360,10 +422,12 @@ impl ClaudeCodeClient {
                 "--include-partial-messages",
             ],
             &sent_system_prompt,
+            &system_prompt_file,
         );
+        let _temp_file_guard = TempFileGuard(system_prompt_file);
 
         let mut child = command
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -378,6 +442,16 @@ impl ClaudeCodeClient {
             "[스트리밍 쿼리] 프로세스 생성 완료 (pid: {})",
             child.id(),
         );
+
+        // 사용자 프롬프트를 stdin으로 전달한 후 파이프를 닫는다.
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(request.user_prompt.as_bytes()).map_err(|err| {
+                crate::cli_log!("[스트리밍 쿼리 실패] stdin 쓰기 오류: {}", err);
+                ClaudeCodeClientError::CommandExecutionFailed {
+                    message: format!("stdin 쓰기 실패: {}", err),
+                }
+            })?;
+        }
 
         let stdout = child.stdout.take().expect("stdout must be piped");
         let reader = std::io::BufReader::new(stdout);

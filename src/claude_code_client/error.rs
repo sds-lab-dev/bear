@@ -21,6 +21,9 @@ pub enum ClaudeCodeClientError {
         source: std::io::Error,
     },
 
+    #[error("failed to write system prompt to temp file: {source}")]
+    SystemPromptFileWriteFailed { source: std::io::Error },
+
     #[error("structured_output field is missing from the response")]
     MissingStructuredOutput,
 
