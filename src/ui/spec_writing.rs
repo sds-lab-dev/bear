@@ -113,10 +113,8 @@ The user may not immediately decide. Instead, they may ask counter-questions to 
 Output MUST be valid JSON conforming to the provided JSON Schema.
 Output MUST contain ONLY the JSON object, with no extra text.
 
-Original user request (verbatim):
-<<<
-{{ORIGINAL_REQUEST_TEXT}}
->>>
+You MUST read the original user request from the following file before proceeding:
+- {{USER_REQUEST_PATH}}
 
 Clarification Q&A log:
 <<<
@@ -156,16 +154,23 @@ User feedback:
 {{USER_FEEDBACK}}
 >>>"#;
 
-pub fn build_initial_spec_prompt(original_request: &str, qa_log: &[QaRound]) -> String {
+pub fn build_initial_spec_prompt(user_request_path: &Path, qa_log: &[QaRound]) -> String {
     let qa_log_text = format_qa_log(qa_log);
 
     INITIAL_SPEC_PROMPT_TEMPLATE
-        .replace("{{ORIGINAL_REQUEST_TEXT}}", original_request)
+        .replace("{{USER_REQUEST_PATH}}", &user_request_path.display().to_string())
         .replace("{{QA_LOG_TEXT}}", &qa_log_text)
 }
 
 pub fn build_revision_prompt(user_feedback: &str) -> String {
     REVISION_PROMPT_TEMPLATE.replace("{{USER_FEEDBACK}}", user_feedback)
+}
+
+pub fn build_followup_revision_prompt(user_feedback: &str) -> String {
+    format!(
+        "User feedback:\n<<<\n{}\n>>>",
+        user_feedback,
+    )
 }
 
 fn format_qa_log(qa_log: &[QaRound]) -> String {
@@ -182,6 +187,21 @@ fn format_qa_log(qa_log: &[QaRound]) -> String {
         result.push_str(&format!("\nUser's answer:\n{}\n\n", round.answer));
     }
     result
+}
+
+pub fn save_user_request(
+    workspace: &Path,
+    date_dir: &str,
+    session_name: &str,
+    user_request: &str,
+) -> io::Result<PathBuf> {
+    let dir = workspace.join(".bear").join(date_dir).join(session_name);
+    fs::create_dir_all(&dir)?;
+
+    let file_path = dir.join("user-request.md");
+    fs::write(&file_path, user_request)?;
+
+    Ok(file_path)
 }
 
 pub fn save_approved_spec(
@@ -278,9 +298,10 @@ mod tests {
             answer: "Full scope".to_string(),
         }];
 
-        let prompt = build_initial_spec_prompt("Build a CLI tool", &qa_log);
+        let user_request_path = Path::new("/workspace/.bear/20250101/session/user-request.md");
+        let prompt = build_initial_spec_prompt(user_request_path, &qa_log);
 
-        assert!(prompt.contains("Build a CLI tool"));
+        assert!(prompt.contains("/workspace/.bear/20250101/session/user-request.md"));
         assert!(prompt.contains("What scope?"));
         assert!(prompt.contains("Full scope"));
     }
@@ -318,5 +339,42 @@ mod tests {
             .join("my-session")
             .join("spec.md");
         assert_eq!(path, expected);
+    }
+
+    #[test]
+    fn save_user_request_creates_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let user_request = "CLI 도구를 만들어 주세요.";
+
+        let path =
+            save_user_request(temp_dir.path(), "20250101", "test-session", user_request).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, user_request);
+    }
+
+    #[test]
+    fn save_user_request_file_path_structure() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let path =
+            save_user_request(temp_dir.path(), "20250101", "my-session", "request").unwrap();
+
+        let expected = temp_dir
+            .path()
+            .join(".bear")
+            .join("20250101")
+            .join("my-session")
+            .join("user-request.md");
+        assert_eq!(path, expected);
+    }
+
+    #[test]
+    fn build_followup_revision_prompt_contains_only_feedback() {
+        let prompt = build_followup_revision_prompt("에러 처리 섹션을 추가해주세요");
+
+        assert!(prompt.contains("에러 처리 섹션을 추가해주세요"));
+        assert!(!prompt.contains("APPROVAL DETECTION"));
+        assert!(!prompt.contains("DECISION ESCALATION"));
     }
 }

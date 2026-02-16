@@ -87,6 +87,7 @@ pub struct App {
     last_plan_draft: Option<String>,
     plan_clarification_questions: Vec<String>,
     approved_spec: Option<String>,
+    spec_revision_instructions_sent: bool,
     session_name: Option<String>,
     session_date_dir: Option<String>,
     coding_state: Option<CodingPhaseState>,
@@ -144,6 +145,7 @@ impl App {
             last_plan_draft: None,
             plan_clarification_questions: Vec::new(),
             approved_spec: None,
+            spec_revision_instructions_sent: false,
             session_name: None,
             session_date_dir: None,
             coding_state: None,
@@ -235,6 +237,18 @@ impl App {
         loop {
             match receiver.try_recv() {
                 Ok(AgentStreamMessage::SessionName { name, date_dir }) => {
+                    if let (Some(workspace), Some(user_request)) = (
+                        &self.confirmed_workspace,
+                        &self.confirmed_requirements,
+                    )
+                        && let Err(err) = spec_writing::save_user_request(
+                            workspace, &date_dir, &name, user_request,
+                        )
+                    {
+                        self.add_system_message(
+                            &format!("사용자 요청 파일 저장 실패: {}", err),
+                        );
+                    }
                     self.session_name = Some(name);
                     self.session_date_dir = Some(date_dir);
                 }
@@ -571,8 +585,17 @@ impl App {
     fn start_spec_writing_query(&mut self, is_initial: bool) {
         let mut client = self.claude_client.take().expect("client must be available");
 
-        let original_request = self.confirmed_requirements.clone().unwrap();
         let qa_log = self.qa_log.clone();
+        let user_request_path = match (
+            &self.confirmed_workspace,
+            &self.session_date_dir,
+            &self.session_name,
+        ) {
+            (Some(ws), Some(date), Some(name)) => {
+                ws.join(".bear").join(date).join(name).join("user-request.md")
+            }
+            _ => PathBuf::new(),
+        };
         let user_feedback = if is_initial {
             None
         } else {
@@ -582,6 +605,13 @@ impl App {
                 .find(|m| matches!(m.role, MessageRole::User))
                 .map(|m| m.content.clone())
         };
+        let send_full_revision_instructions = if is_initial {
+            false
+        } else {
+            let should_send = !self.spec_revision_instructions_sent;
+            self.spec_revision_instructions_sent = true;
+            should_send
+        };
 
         let (sender, receiver) = mpsc::channel();
         self.agent_result_receiver = Some(receiver);
@@ -590,10 +620,14 @@ impl App {
 
         std::thread::spawn(move || {
             let user_prompt = if is_initial {
-                spec_writing::build_initial_spec_prompt(&original_request, &qa_log)
+                spec_writing::build_initial_spec_prompt(&user_request_path, &qa_log)
             } else {
                 let feedback = user_feedback.unwrap_or_default();
-                spec_writing::build_revision_prompt(&feedback)
+                if send_full_revision_instructions {
+                    spec_writing::build_revision_prompt(&feedback)
+                } else {
+                    spec_writing::build_followup_revision_prompt(&feedback)
+                }
             };
 
             let request = ClaudeCodeRequest {
@@ -706,8 +740,26 @@ impl App {
             client.set_system_prompt(Some(planning::system_prompt().to_string()));
         }
 
-        let approved_spec = self.approved_spec.clone().unwrap_or_default();
-        let user_request = self.confirmed_requirements.clone().unwrap_or_default();
+        let user_request_path = match (
+            &self.confirmed_workspace,
+            &self.session_date_dir,
+            &self.session_name,
+        ) {
+            (Some(ws), Some(date), Some(name)) => {
+                ws.join(".bear").join(date).join(name).join("user-request.md")
+            }
+            _ => PathBuf::new(),
+        };
+        let spec_path = match (
+            &self.confirmed_workspace,
+            &self.session_date_dir,
+            &self.session_name,
+        ) {
+            (Some(ws), Some(date), Some(name)) => {
+                ws.join(".bear").join(date).join(name).join("spec.md")
+            }
+            _ => PathBuf::new(),
+        };
         let user_feedback = if is_initial {
             None
         } else {
@@ -725,7 +777,7 @@ impl App {
 
         std::thread::spawn(move || {
             let user_prompt = if is_initial {
-                planning::build_initial_plan_prompt(&user_request, &approved_spec)
+                planning::build_initial_plan_prompt(&user_request_path, &spec_path)
             } else {
                 let feedback = user_feedback.unwrap_or_default();
                 planning::build_plan_revision_prompt(&feedback)

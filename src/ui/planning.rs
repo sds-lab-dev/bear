@@ -463,15 +463,11 @@ Before finalizing the plan, you MUST verify that:
 
 ---
 
-Initial user request (verbatim):
-<<<
-{{USER_REQUEST}}
->>>
-
-Approved specification (verbatim):
-<<<
-{{APPROVED_SPEC}}
->>>"#;
+You MUST read the following files for context before producing the plan:
+- Initial user request:
+  - {{USER_REQUEST_PATH}}
+- Approved specification:
+  - {{SPEC_PATH}}"#;
 
 const REVISION_PLAN_PROMPT_TEMPLATE: &str = r#"The user has provided feedback on the plan draft. Please revise the plan accordingly.
 
@@ -540,10 +536,10 @@ User feedback:
 {{USER_FEEDBACK}}
 >>>"#;
 
-pub fn build_initial_plan_prompt(user_request: &str, approved_spec: &str) -> String {
+pub fn build_initial_plan_prompt(user_request_path: &Path, spec_path: &Path) -> String {
     INITIAL_PLAN_PROMPT_TEMPLATE
-        .replace("{{USER_REQUEST}}", user_request)
-        .replace("{{APPROVED_SPEC}}", approved_spec)
+        .replace("{{USER_REQUEST_PATH}}", &user_request_path.display().to_string())
+        .replace("{{SPEC_PATH}}", &spec_path.display().to_string())
 }
 
 pub fn build_plan_revision_prompt(user_feedback: &str) -> String {
@@ -644,11 +640,13 @@ mod tests {
     }
 
     #[test]
-    fn build_initial_prompt_contains_user_request_and_spec() {
-        let prompt = build_initial_plan_prompt("Build a CLI tool", "# Approved Spec\nBuild a CLI tool");
+    fn build_initial_prompt_contains_file_paths() {
+        let user_request_path = Path::new("/workspace/.bear/20250101/session/user-request.md");
+        let spec_path = Path::new("/workspace/.bear/20250101/session/spec.md");
+        let prompt = build_initial_plan_prompt(user_request_path, spec_path);
 
-        assert!(prompt.contains("Build a CLI tool"));
-        assert!(prompt.contains("# Approved Spec\nBuild a CLI tool"));
+        assert!(prompt.contains("/workspace/.bear/20250101/session/user-request.md"));
+        assert!(prompt.contains("/workspace/.bear/20250101/session/spec.md"));
         assert!(prompt.contains("Planning Process"));
     }
 
