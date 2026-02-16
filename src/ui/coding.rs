@@ -110,11 +110,12 @@ pub fn task_extraction_system_prompt() -> &'static str {
 
 Rules:
 - Extract every implementation task from the plan.
-- Each task MUST have a unique task id (e.g., "TASK-0", "TASK-1", ...).
+- Each task MUST have a unique task id (e.g., "TASK-00", "TASK-01", ...). The number part MUST be zero-padded to two digits.
+- The maximum number of tasks allowed in a single plan is 100 (i.e., "TASK-00" through "TASK-99").
 - For each task, provide the title and a comprehensive description containing ALL implementation details from the plan: file paths, new symbols, edit intent, pseudocode, acceptance criteria.
 - List direct dependency task_ids in the "dependencies" array. If a task has no dependencies, use an empty array.
 - Return tasks in topological order: tasks with no dependencies first, followed by tasks whose dependencies all appear earlier in the list.
-- If the plan contains no explicit task decomposition section, treat the entire plan as a single task with task id "TASK-0".
+- If the plan contains no explicit task decomposition section, treat the entire plan as a single task with task id "TASK-00".
 - Output MUST be Korean for titles and descriptions, preserving code identifiers as-is.
 
 Output MUST be valid JSON conforming to the provided JSON Schema.
@@ -726,16 +727,16 @@ mod tests {
         let json = serde_json::json!({
             "tasks": [
                 {
-                    "task_id": "TASK-0",
+                    "task_id": "TASK-00",
                     "title": "기본 타입 정의",
                     "description": "핵심 타입들을 정의합니다.",
                     "dependencies": []
                 },
                 {
-                    "task_id": "TASK-1",
+                    "task_id": "TASK-01",
                     "title": "비즈니스 로직 구현",
                     "description": "핵심 로직을 구현합니다.",
-                    "dependencies": ["TASK-0"]
+                    "dependencies": ["TASK-00"]
                 }
             ]
         });
@@ -743,9 +744,9 @@ mod tests {
         let response: TaskExtractionResponse = serde_json::from_value(json).unwrap();
 
         assert_eq!(response.tasks.len(), 2);
-        assert_eq!(response.tasks[0].task_id, "TASK-0");
+        assert_eq!(response.tasks[0].task_id, "TASK-00");
         assert!(response.tasks[0].dependencies.is_empty());
-        assert_eq!(response.tasks[1].dependencies, vec!["TASK-0"]);
+        assert_eq!(response.tasks[1].dependencies, vec!["TASK-00"]);
     }
 
     #[test]
@@ -785,30 +786,30 @@ mod tests {
     #[test]
     fn coding_task_prompt_contains_all_fields() {
         let task = CodingTask {
-            task_id: "TASK-0".to_string(),
+            task_id: "TASK-00".to_string(),
             title: "기본 타입 정의".to_string(),
             description: "핵심 타입을 정의합니다.".to_string(),
-            dependencies: vec!["TASK-1".to_string()],
+            dependencies: vec!["TASK-01".to_string()],
         };
 
         let spec_path = Path::new("/workspace/.bear/20260215/session/spec.md");
         let plan_path = Path::new("/workspace/.bear/20260215/session/plan.md");
-        let upstream_paths = vec![PathBuf::from("/workspace/.bear/20260215/session/TASK-1.md")];
+        let upstream_paths = vec![PathBuf::from("/workspace/.bear/20260215/session/TASK-01.md")];
 
         let prompt = build_coding_task_prompt(&task, spec_path, plan_path, &upstream_paths);
 
-        assert!(prompt.contains("TASK-0"));
+        assert!(prompt.contains("TASK-00"));
         assert!(prompt.contains("기본 타입 정의"));
         assert!(prompt.contains("핵심 타입을 정의합니다."));
         assert!(prompt.contains(&spec_path.display().to_string()));
         assert!(prompt.contains(&plan_path.display().to_string()));
-        assert!(prompt.contains("TASK-1.md"));
+        assert!(prompt.contains("TASK-01.md"));
     }
 
     #[test]
     fn coding_task_prompt_without_upstream_report() {
         let task = CodingTask {
-            task_id: "TASK-0".to_string(),
+            task_id: "TASK-00".to_string(),
             title: "독립 작업".to_string(),
             description: "의존성 없는 작업".to_string(),
             dependencies: vec![],
@@ -830,7 +831,7 @@ mod tests {
             temp_dir.path(),
             "20260215",
             "test-session",
-            "TASK-0",
+            "TASK-00",
             report_content,
         )
         .unwrap();
@@ -840,7 +841,7 @@ mod tests {
             .join(".bear")
             .join("20260215")
             .join("test-session")
-            .join("TASK-0.md");
+            .join("TASK-00.md");
         assert_eq!(path, expected);
 
         let content = fs::read_to_string(&path).unwrap();
@@ -850,38 +851,38 @@ mod tests {
     #[test]
     fn collect_upstream_report_paths_with_dependencies() {
         let task = CodingTask {
-            task_id: "TASK-2".to_string(),
+            task_id: "TASK-02".to_string(),
             title: "후속 작업".to_string(),
-            description: "TASK-0, TASK-1에 의존".to_string(),
-            dependencies: vec!["TASK-0".to_string(), "TASK-1".to_string()],
+            description: "TASK-00, TASK-01에 의존".to_string(),
+            dependencies: vec!["TASK-00".to_string(), "TASK-01".to_string()],
         };
 
         let reports = vec![
             TaskReport {
-                task_id: "TASK-0".to_string(),
+                task_id: "TASK-00".to_string(),
                 status: CodingTaskStatus::ImplementationSuccess,
-                report: "TASK-0 완료".to_string(),
-                report_file_path: PathBuf::from("/tmp/TASK-0.md"),
+                report: "TASK-00 완료".to_string(),
+                report_file_path: PathBuf::from("/tmp/TASK-00.md"),
             },
             TaskReport {
-                task_id: "TASK-1".to_string(),
+                task_id: "TASK-01".to_string(),
                 status: CodingTaskStatus::ImplementationSuccess,
-                report: "TASK-1 완료".to_string(),
-                report_file_path: PathBuf::from("/tmp/TASK-1.md"),
+                report: "TASK-01 완료".to_string(),
+                report_file_path: PathBuf::from("/tmp/TASK-01.md"),
             },
         ];
 
         let paths = collect_upstream_report_paths(&task, &reports);
 
         assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0], PathBuf::from("/tmp/TASK-0.md"));
-        assert_eq!(paths[1], PathBuf::from("/tmp/TASK-1.md"));
+        assert_eq!(paths[0], PathBuf::from("/tmp/TASK-00.md"));
+        assert_eq!(paths[1], PathBuf::from("/tmp/TASK-01.md"));
     }
 
     #[test]
     fn collect_upstream_report_paths_without_dependencies() {
         let task = CodingTask {
-            task_id: "TASK-0".to_string(),
+            task_id: "TASK-00".to_string(),
             title: "독립 작업".to_string(),
             description: "의존성 없음".to_string(),
             dependencies: vec![],
