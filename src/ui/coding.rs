@@ -677,7 +677,9 @@ pub fn build_coding_task_prompt(
 // Prompts – Conflict Resolution
 // ---------------------------------------------------------------------------
 
-const CONFLICT_RESOLUTION_PROMPT_TEMPLATE: &str = r#"A rebase onto the integration branch has produced merge conflicts that you must resolve.
+const CONFLICT_RESOLUTION_PROMPT_TEMPLATE: &str = r#"# Rebase Conflict Resolution Prompt (commit-first, root-cause driven)
+
+A rebase onto the integration branch has produced merge conflicts that you must resolve.
 
 Integration branch: {{INTEGRATION_BRANCH}}
 Task ID: {{TASK_ID}}
@@ -685,14 +687,57 @@ Task ID: {{TASK_ID}}
 Conflicted files:
 {{CONFLICTED_FILES}}
 
-Instructions:
-1. Examine each conflicted file and resolve the merge conflicts.
-2. After resolving all conflicts, stage the resolved files with `git add` for each file.
-3. Complete the rebase with `git rebase --continue`.
-4. If the rebase continues and produces more conflicts, resolve them and repeat.
-5. If resolution is not possible, run `git rebase --abort` and report failure.
+Hard requirement (do this before editing any file):
+You MUST examine the relevant commits on BOTH sides (integration branch changes and this task's changes) and use that evidence to determine the root cause of the conflicts. Do NOT start by manually editing conflicted files.
 
-Output MUST be valid JSON conforming to the provided JSON Schema."#;
+Required Git investigation (run in this worktree):
+1) Capture the exact rebase state and base:
+   - `git status`
+   - `git rev-parse --abbrev-ref HEAD`
+   - `git rev-parse --short HEAD`
+   - `git branch --show-current`
+
+2) Identify what changed on the integration branch since this task branch diverged:
+   - Find merge-base: `git merge-base HEAD {{INTEGRATION_BRANCH}}`
+   - List integration commits not in this branch:
+     `git log --oneline --decorate --no-merges --reverse <MERGE_BASE>..{{INTEGRATION_BRANCH}}`
+
+3) Identify what this task changed relative to the same merge-base:
+   - `git log --oneline --decorate --no-merges --reverse <MERGE_BASE>..HEAD`
+   - For conflicted files, show per-file history and diffs on BOTH sides:
+     - `git log --oneline --follow -- <FILE>`
+     - `git diff <MERGE_BASE>..{{INTEGRATION_BRANCH}} -- <FILE>`
+     - `git diff <MERGE_BASE>..HEAD -- <FILE>`
+
+4) For the current conflict, inspect the three-way versions for EACH conflicted file:
+   - Base:   `git show :1:<FILE>` (if available)
+   - Ours:   `git show :2:<FILE>`
+   - Theirs: `git show :3:<FILE>`
+   - Optional: `git diff --ours -- <FILE>` and `git diff --theirs -- <FILE>`
+
+Resolution rules (apply after the investigation):
+A) Use the commit comparison to state the root cause for each conflicted file:
+   - Which integration commit(s) touched the same lines/structures?
+   - Which task commit(s) touched the same lines/structures?
+   - What semantic intent do those commits appear to have?
+
+B) Resolve conflicts by preserving BOTH intents whenever possible:
+   - Prefer minimal edits that reconcile behavior, not just "make it compile".
+   - If integration introduced an API change, migrate this task's code to the new API.
+   - If both sides made independent improvements, combine them unless they are mutually exclusive.
+
+C) Only after finishing the conflict edits:
+   1. Stage resolved files: `git add <FILE>` for each file
+   2. Continue rebase: `git rebase --continue`
+   3. If more conflicts occur, repeat the same process.
+
+Failure rule:
+If you determine a correct resolution is not possible without violating the task's specification or causing regressions, abort the rebase:
+- `git rebase --abort`
+Then report failure with the precise reason and which commits caused irreconcilable intent.
+
+Output requirements:
+- Output MUST be valid JSON conforming to the provided JSON Schema."#;
 
 pub fn build_conflict_resolution_prompt(
     task_id: &str,
@@ -715,7 +760,9 @@ pub fn build_conflict_resolution_prompt(
 // Prompts – Build/Test Repair
 // ---------------------------------------------------------------------------
 
-const BUILD_TEST_REPAIR_PROMPT_TEMPLATE: &str = r#"After rebasing onto the integration branch, the build or tests failed for task {{TASK_ID}}.
+const BUILD_TEST_REPAIR_PROMPT_TEMPLATE: &str = r#"# Build/Test Failure Resolution Prompt (commit-first, regression-aware)
+
+After rebasing onto the integration branch, the build or tests failed for task {{TASK_ID}}.
 
 Build command: {{BUILD_COMMAND}}
 Test command: {{TEST_COMMAND}}
@@ -723,14 +770,63 @@ Test command: {{TEST_COMMAND}}
 Error output:
 {{ERROR_OUTPUT}}
 
-Instructions:
-1. Analyze the error output to identify the root cause.
-2. Fix the code so that the build and tests pass.
-3. Run the build command (`{{BUILD_COMMAND}}`) and verify it succeeds.
-4. Run the test command (`{{TEST_COMMAND}}`) and verify all tests pass.
-5. If you cannot fix the issue, report failure with a clear explanation.
+Hard requirement (do this before changing code):
+You MUST determine whether the failure is caused by (a) integration branch changes, (b) this task's changes, or (c) an interaction between them. Do NOT start by patching files directly based only on the error text.
 
-Output MUST be valid JSON conforming to the provided JSON Schema."#;
+Required Git + diagnosis workflow:
+1) Record environment and current revision:
+   - `git status`
+   - `git rev-parse --short HEAD`
+   - `git log -1 --oneline --decorate`
+
+2) Identify the commit ranges to compare:
+   - `git merge-base HEAD {{INTEGRATION_BRANCH}}` (if {{INTEGRATION_BRANCH}} is still available locally; otherwise use the recorded pre-rebase base)
+   - Integration delta (what recently landed that might affect this task):
+     `git log --oneline --decorate --no-merges --reverse <MERGE_BASE>..{{INTEGRATION_BRANCH}}`
+   - Task delta (what this task introduced):
+     `git log --oneline --decorate --no-merges --reverse <MERGE_BASE>..HEAD`
+
+3) Map the failure to likely areas:
+   - If the error mentions a symbol/file/package/module, locate where it was changed:
+     - `git log --oneline --follow -- <SUSPECT_FILE>`
+     - `git blame <SUSPECT_FILE>` around failing lines
+   - If the failure is test-related, identify the specific failing tests and their ownership:
+     - Run the test command in a way that reveals the failing test names (adjust flags as appropriate).
+   - If build-related, capture the FIRST error (not the cascade) and identify the compilation unit.
+
+4) Perform a "cause isolation" check using commits (pick the smallest applicable approach):
+   - If feasible, run build/tests at:
+     A) the merge-base (`git checkout <MERGE_BASE>`) to see if it was already failing,
+     B) the integration branch head,
+     C) the task head,
+     and compare results (return to task head afterwards).
+   - If checking out is too disruptive, use:
+     - `git show <COMMIT>:<FILE>` to compare before/after for suspect files.
+
+Fix rules:
+A) State a root cause hypothesis backed by commit evidence:
+   - Which integration commit(s) introduced an incompatible API/behavior change?
+   - Which task commit(s) rely on old assumptions?
+   - Is it a deterministic failure (always) or flaky (intermittent)?
+
+B) Apply the smallest correct fix in this task worktree:
+   - Prefer adapting this task to integration's new contracts (API, schema, behavior).
+   - Avoid sweeping refactors unrelated to the failure.
+   - If the correct fix belongs in the integration branch (pre-existing bug), still implement the minimal fix here only if it is safe and consistent with the integration direction; otherwise report that the upstream fix is required.
+
+C) Verify:
+   1. Run `{{BUILD_COMMAND}}` and confirm success.
+   2. Run `{{TEST_COMMAND}}` and confirm all tests pass.
+   3. If you changed behavior, add/adjust the minimal test that proves the intended behavior (only if necessary and within the task scope).
+
+Failure rule:
+If you cannot fix the issue without changing requirements or introducing a risky cross-cutting change, report failure with:
+- the suspected offending commits,
+- why the failure is not safely fixable here,
+- what upstream or spec decision is needed.
+
+Output requirements:
+- Output MUST be valid JSON conforming to the provided JSON Schema."#;
 
 pub fn build_build_test_repair_prompt(
     task_id: &str,
