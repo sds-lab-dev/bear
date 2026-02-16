@@ -98,6 +98,7 @@ pub struct App {
     spec_revision_instructions_sent: bool,
     session_name: Option<String>,
     session_date_dir: Option<String>,
+    journal_dir: Option<PathBuf>,
     coding_state: Option<CodingPhaseState>,
     pending_coding_report: Option<String>,
     review_state: Option<ReviewState>,
@@ -171,6 +172,7 @@ impl App {
             spec_revision_instructions_sent: false,
             session_name: None,
             session_date_dir: None,
+            journal_dir: None,
             coding_state: None,
             pending_coding_report: None,
             review_state: None,
@@ -276,13 +278,16 @@ impl App {
         loop {
             match receiver.try_recv() {
                 Ok(AgentStreamMessage::SessionName { name, date_dir }) => {
-                    if let (Some(workspace), Some(user_request)) = (
-                        &self.confirmed_workspace,
-                        &self.confirmed_requirements,
-                    )
-                        && let Err(err) = spec_writing::save_user_request(
-                            workspace, &date_dir, &name, user_request,
-                        )
+                    if self.journal_dir.is_none()
+                        && let Some(ws) = &self.confirmed_workspace
+                    {
+                        self.journal_dir =
+                            Some(ws.join(".bear").join(&date_dir).join(&name));
+                    }
+                    let journal_dir = self.journal_dir();
+                    if let Some(user_request) = &self.confirmed_requirements
+                        && let Err(err) =
+                            spec_writing::save_user_request(&journal_dir, user_request)
                     {
                         self.add_system_message(
                             &format!("사용자 요청 파일 저장 실패: {}", err),
@@ -375,6 +380,16 @@ impl App {
 
     pub fn selected_mode_index(&self) -> usize {
         self.selected_mode_index
+    }
+
+    fn journal_dir(&self) -> PathBuf {
+        if let Some(dir) = &self.journal_dir {
+            return dir.clone();
+        }
+        match (&self.confirmed_workspace, &self.session_date_dir, &self.session_name) {
+            (Some(ws), Some(date), Some(name)) => ws.join(".bear").join(date).join(name),
+            _ => PathBuf::new(),
+        }
     }
 
     pub fn is_thinking(&self) -> bool {
@@ -761,6 +776,10 @@ impl App {
         let imported_spec_path = self.imported_spec_path.clone().unwrap();
         let imported_plan_path = self.imported_plan_path.clone();
 
+        // 가져온 스펙 파일이 위치한 디렉토리를 journal_dir로 설정
+        let journal_dir = imported_spec_path.parent().unwrap().to_path_buf();
+        self.journal_dir = Some(journal_dir.clone());
+
         let (sender, receiver) = mpsc::channel();
         self.agent_result_receiver = Some(receiver);
         self.input_mode = InputMode::AgentThinking;
@@ -777,7 +796,6 @@ impl App {
         }
 
         std::thread::spawn(move || {
-            // 스펙 내용 앞 500자를 사용하여 세션 이름 생성
             let spec_preview: String = spec_content.chars().take(500).collect();
             let session_name = generate_session_name(&mut client, &spec_preview);
             let date_dir = session_naming::today_date_string();
@@ -786,40 +804,22 @@ impl App {
             client.reset_session();
 
             let _ = sender.send(AgentStreamMessage::SessionName {
-                name: session_name.clone(),
-                date_dir: date_dir.clone(),
+                name: session_name,
+                date_dir,
             });
 
-            // 세션 디렉토리 생성 및 파일 복사
-            let session_dir = workspace
-                .join(".bear")
-                .join(&date_dir)
-                .join(&session_name);
-            if let Err(err) = std::fs::create_dir_all(&session_dir) {
-                let _ = sender.send(AgentStreamMessage::Completed(AgentThreadResult {
-                    client,
-                    outcome: Err(format!("세션 디렉토리 생성 실패: {}", err)),
-                }));
-                return;
-            }
-
+            // 가져온 파일의 디렉토리에 user-request.md 생성
             let user_request_content = format!(
                 "외부 스펙 파일에서 가져옴: {}",
                 imported_spec_path.display()
             );
-            let _ = std::fs::write(
-                session_dir.join("user-request.md"),
-                &user_request_content,
-            );
-            let _ = std::fs::copy(&imported_spec_path, session_dir.join("spec.md"));
+            let user_request_path = journal_dir.join("user-request.md");
+            let _ = std::fs::write(&user_request_path, &user_request_content);
 
-            if let Some(plan_src) = &imported_plan_path {
-                let _ = std::fs::copy(plan_src, session_dir.join("plan.md"));
-            }
-
-            let user_request_path = session_dir.join("user-request.md");
-            let spec_path = session_dir.join("spec.md");
-            let plan_path = session_dir.join("plan.md");
+            // 가져온 파일의 실제 경로를 그대로 사용
+            let spec_path = imported_spec_path;
+            let plan_path = imported_plan_path
+                .unwrap_or_else(|| journal_dir.join("plan.md"));
 
             if is_plan_mode {
                 // 모드 3: 태스크 추출 시작
@@ -990,16 +990,7 @@ impl App {
         let mut client = self.claude_client.take().expect("client must be available");
 
         let qa_log = self.qa_log.clone();
-        let user_request_path = match (
-            &self.confirmed_workspace,
-            &self.session_date_dir,
-            &self.session_name,
-        ) {
-            (Some(ws), Some(date), Some(name)) => {
-                ws.join(".bear").join(date).join(name).join("user-request.md")
-            }
-            _ => PathBuf::new(),
-        };
+        let user_request_path = self.journal_dir().join("user-request.md");
         let user_feedback = if is_initial {
             None
         } else {
@@ -1121,14 +1112,8 @@ impl App {
 
         self.approved_spec = Some(spec.clone());
 
-        if let (Some(workspace), Some(date_dir), Some(session_name)) = (
-            &self.confirmed_workspace,
-            &self.session_date_dir,
-            &self.session_name,
-        )
-            && let Err(err) =
-                spec_writing::save_approved_spec(workspace, date_dir, session_name, &spec)
-        {
+        let journal_dir = self.journal_dir();
+        if let Err(err) = spec_writing::save_approved_spec(&journal_dir, &spec) {
             self.add_system_message(&format!("스펙 파일 저장 실패: {}", err));
         }
 
@@ -1144,26 +1129,9 @@ impl App {
             client.set_system_prompt(Some(planning::system_prompt().to_string()));
         }
 
-        let user_request_path = match (
-            &self.confirmed_workspace,
-            &self.session_date_dir,
-            &self.session_name,
-        ) {
-            (Some(ws), Some(date), Some(name)) => {
-                ws.join(".bear").join(date).join(name).join("user-request.md")
-            }
-            _ => PathBuf::new(),
-        };
-        let spec_path = match (
-            &self.confirmed_workspace,
-            &self.session_date_dir,
-            &self.session_name,
-        ) {
-            (Some(ws), Some(date), Some(name)) => {
-                ws.join(".bear").join(date).join(name).join("spec.md")
-            }
-            _ => PathBuf::new(),
-        };
+        let journal_dir = self.journal_dir();
+        let user_request_path = journal_dir.join("user-request.md");
+        let spec_path = journal_dir.join("spec.md");
         let user_feedback = if is_initial {
             None
         } else {
@@ -1272,14 +1240,8 @@ impl App {
             }
         };
 
-        if let (Some(workspace), Some(date_dir), Some(session_name)) = (
-            &self.confirmed_workspace,
-            &self.session_date_dir,
-            &self.session_name,
-        )
-            && let Err(err) =
-                planning::save_approved_plan(workspace, date_dir, session_name, &plan)
-        {
+        let journal_dir = self.journal_dir();
+        if let Err(err) = planning::save_approved_plan(&journal_dir, &plan) {
             self.add_system_message(&format!("플랜 파일 저장 실패: {}", err));
         }
 
@@ -1292,12 +1254,7 @@ impl App {
         client.reset_session();
         client.set_system_prompt(Some(coding::task_extraction_system_prompt().to_string()));
 
-        let plan_path = match (&self.confirmed_workspace, &self.session_date_dir, &self.session_name) {
-            (Some(ws), Some(date), Some(name)) => {
-                ws.join(".bear").join(date).join(name).join("plan.md")
-            }
-            _ => PathBuf::new(),
-        };
+        let plan_path = self.journal_dir().join("plan.md");
 
         let (sender, receiver) = mpsc::channel();
         self.agent_result_receiver = Some(receiver);
@@ -1470,18 +1427,9 @@ impl App {
             task_branch,
         });
 
-        let spec_path = match (&self.confirmed_workspace, &self.session_date_dir, &self.session_name) {
-            (Some(ws), Some(date), Some(name)) => {
-                ws.join(".bear").join(date).join(name).join("spec.md")
-            }
-            _ => PathBuf::new(),
-        };
-        let plan_path = match (&self.confirmed_workspace, &self.session_date_dir, &self.session_name) {
-            (Some(ws), Some(date), Some(name)) => {
-                ws.join(".bear").join(date).join(name).join("plan.md")
-            }
-            _ => PathBuf::new(),
-        };
+        let journal_dir = self.journal_dir();
+        let spec_path = journal_dir.join("spec.md");
+        let plan_path = journal_dir.join("plan.md");
         let api_key = self.config.api_key().to_string();
 
         let mut client = match ClaudeCodeClient::new(
@@ -2391,14 +2339,9 @@ impl App {
         status: CodingTaskStatus,
         report: String,
     ) {
-        let workspace = self.confirmed_workspace.clone().unwrap();
-        let date_dir = self.session_date_dir.clone().unwrap_or_default();
-        let session_name = self.session_name.clone().unwrap_or_default();
-
+        let journal_dir = self.journal_dir();
         let report_file_path = match coding::save_task_report(
-            &workspace,
-            &date_dir,
-            &session_name,
+            &journal_dir,
             &task_id,
             &report,
         ) {

@@ -187,14 +187,8 @@ fn format_qa_log(qa_log: &[QaRound]) -> String {
     result
 }
 
-pub fn save_user_request(
-    workspace: &Path,
-    date_dir: &str,
-    session_name: &str,
-    user_request: &str,
-) -> io::Result<PathBuf> {
-    let dir = workspace.join(".bear").join(date_dir).join(session_name);
-    fs::create_dir_all(&dir)?;
+pub fn save_user_request(dir: &Path, user_request: &str) -> io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
 
     let file_path = dir.join("user-request.md");
     fs::write(&file_path, user_request)?;
@@ -202,14 +196,8 @@ pub fn save_user_request(
     Ok(file_path)
 }
 
-pub fn save_approved_spec(
-    workspace: &Path,
-    date_dir: &str,
-    session_name: &str,
-    spec_text: &str,
-) -> io::Result<PathBuf> {
-    let dir = workspace.join(".bear").join(date_dir).join(session_name);
-    fs::create_dir_all(&dir)?;
+pub fn save_approved_spec(dir: &Path, spec_text: &str) -> io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
 
     let file_path = dir.join("spec.md");
     fs::write(&file_path, spec_text)?;
@@ -316,8 +304,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let spec_text = "# Final Spec\n\nThis is the approved spec.";
 
-        let path =
-            save_approved_spec(temp_dir.path(), "20250101", "test-session", spec_text).unwrap();
+        let path = save_approved_spec(temp_dir.path(), spec_text).unwrap();
 
         let content = fs::read_to_string(&path).unwrap();
         assert_eq!(content, spec_text);
@@ -327,15 +314,9 @@ mod tests {
     fn save_approved_spec_file_path_structure() {
         let temp_dir = TempDir::new().unwrap();
 
-        let path =
-            save_approved_spec(temp_dir.path(), "20250101", "my-session", "spec content").unwrap();
+        let path = save_approved_spec(temp_dir.path(), "spec content").unwrap();
 
-        let expected = temp_dir
-            .path()
-            .join(".bear")
-            .join("20250101")
-            .join("my-session")
-            .join("spec.md");
+        let expected = temp_dir.path().join("spec.md");
         assert_eq!(path, expected);
     }
 
@@ -344,8 +325,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let user_request = "CLI 도구를 만들어 주세요.";
 
-        let path =
-            save_user_request(temp_dir.path(), "20250101", "test-session", user_request).unwrap();
+        let path = save_user_request(temp_dir.path(), user_request).unwrap();
 
         let content = fs::read_to_string(&path).unwrap();
         assert_eq!(content, user_request);
@@ -355,15 +335,9 @@ mod tests {
     fn save_user_request_file_path_structure() {
         let temp_dir = TempDir::new().unwrap();
 
-        let path =
-            save_user_request(temp_dir.path(), "20250101", "my-session", "request").unwrap();
+        let path = save_user_request(temp_dir.path(), "request").unwrap();
 
-        let expected = temp_dir
-            .path()
-            .join(".bear")
-            .join("20250101")
-            .join("my-session")
-            .join("user-request.md");
+        let expected = temp_dir.path().join("user-request.md");
         assert_eq!(path, expected);
     }
 

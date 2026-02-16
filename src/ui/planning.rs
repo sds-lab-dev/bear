@@ -544,14 +544,8 @@ pub fn build_plan_revision_prompt(user_feedback: &str) -> String {
     REVISION_PLAN_PROMPT_TEMPLATE.replace("{{USER_FEEDBACK}}", user_feedback)
 }
 
-pub fn save_approved_plan(
-    workspace: &Path,
-    date_dir: &str,
-    session_name: &str,
-    plan_text: &str,
-) -> io::Result<PathBuf> {
-    let dir = workspace.join(".bear").join(date_dir).join(session_name);
-    fs::create_dir_all(&dir)?;
+pub fn save_approved_plan(dir: &Path, plan_text: &str) -> io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
 
     let file_path = dir.join("plan.md");
     fs::write(&file_path, plan_text)?;
@@ -660,8 +654,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let plan_text = "# Final Plan\n\nThis is the approved plan.";
 
-        let path =
-            save_approved_plan(temp_dir.path(), "20250101", "test-session", plan_text).unwrap();
+        let path = save_approved_plan(temp_dir.path(), plan_text).unwrap();
 
         let content = fs::read_to_string(&path).unwrap();
         assert_eq!(content, plan_text);
@@ -671,15 +664,9 @@ mod tests {
     fn save_approved_plan_file_path_structure() {
         let temp_dir = TempDir::new().unwrap();
 
-        let path =
-            save_approved_plan(temp_dir.path(), "20250101", "my-session", "plan content").unwrap();
+        let path = save_approved_plan(temp_dir.path(), "plan content").unwrap();
 
-        let expected = temp_dir
-            .path()
-            .join(".bear")
-            .join("20250101")
-            .join("my-session")
-            .join("plan.md");
+        let expected = temp_dir.path().join("plan.md");
         assert_eq!(path, expected);
     }
 }

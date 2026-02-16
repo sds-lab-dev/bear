@@ -1298,26 +1298,12 @@ pub fn get_latest_commit_revision(worktree_path: &Path) -> Result<String, String
 // Report Management
 // ---------------------------------------------------------------------------
 
-fn session_directory(
-    workspace: &Path,
-    date_dir: &str,
-    session_name: &str,
-) -> PathBuf {
-    workspace
-        .join(".bear")
-        .join(date_dir)
-        .join(session_name)
-}
-
 pub fn save_task_report(
-    workspace: &Path,
-    date_dir: &str,
-    session_name: &str,
+    dir: &Path,
     task_id: &str,
     report: &str,
 ) -> io::Result<PathBuf> {
-    let dir = session_directory(workspace, date_dir, session_name);
-    fs::create_dir_all(&dir)?;
+    fs::create_dir_all(dir)?;
 
     let file_path = dir.join(format!("{}.md", task_id));
     fs::write(&file_path, report)?;
@@ -1524,21 +1510,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let report_content = "# Metadata\n구현 완료";
 
-        let path = save_task_report(
-            temp_dir.path(),
-            "20260215",
-            "test-session",
-            "TASK-00",
-            report_content,
-        )
-        .unwrap();
+        let path = save_task_report(temp_dir.path(), "TASK-00", report_content).unwrap();
 
-        let expected = temp_dir
-            .path()
-            .join(".bear")
-            .join("20260215")
-            .join("test-session")
-            .join("TASK-00.md");
+        let expected = temp_dir.path().join("TASK-00.md");
         assert_eq!(path, expected);
 
         let content = fs::read_to_string(&path).unwrap();
