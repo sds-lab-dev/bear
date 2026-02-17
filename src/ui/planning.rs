@@ -166,8 +166,28 @@ For every task you output, provide enough detail that a coding agent can impleme
 - Acceptance criteria: concrete checks/tests that define "done".
 - Dependency list: prerequisite task IDs (or "none").
 
-4) Keep tasks as small as possible, but not smaller.
-Split work to enable concurrency, but avoid creating tasks so small that coordination overhead dominates. If splitting increases coupling or repeated integration work, prefer a single cohesive task.
+4) Right-size tasks: prefer fewer, cohesive tasks over many fine-grained ones.
+Every task incurs significant overhead: a dedicated coding agent implements it, a review agent reviews it, and revision cycles may repeat multiple times. Excessive task splitting dramatically increases total execution time and AI cost without proportional quality gains.
+
+**Sizing principle:** Each task should represent a cohesive deliverable — a complete feature, a self-contained component, or a meaningful functional unit. A task is NOT an individual implementation step, a single file edit, or one aspect of a larger piece of work. Multiple related requirements (REQ-xxx) SHOULD be grouped into a single task when they belong to the same feature or component.
+
+**Anti-patterns (DO NOT split this way):**
+- Splitting by implementation phase within one feature (e.g., separate tasks for "add dependency", "create entry point", "implement main logic", "add error handling", "write tests"). These are steps within ONE task, not separate tasks.
+- Splitting by individual file when the files form a single cohesive change (e.g., a module file + its test file + its integration into the existing codebase = ONE task).
+- Creating separate tasks for cross-cutting concerns within the same feature (e.g., a separate "error handling" task or "logging" task for code that another task is already building).
+- Creating a dedicated "testing" task. Tests MUST be included in the task whose code they verify.
+- Creating setup or infrastructure tasks that have no independently testable outcome (e.g., "add Cargo dependency", "create module boilerplate").
+
+**When splitting IS justified:**
+- Distinct functional modules with a well-defined interface boundary (e.g., "HTTP API server" vs "database migration layer" vs "CLI client").
+- Truly independent features that share no implementation logic (e.g., "user authentication" vs "report generation").
+- A shared foundation (types, interfaces, utilities) that multiple subsequent tasks depend on — but ONLY when the foundation is substantial enough to warrant its own implementation and review.
+
+**Sizing heuristic:**
+- A simple feature (e.g., a new UI screen with user input, a CRUD endpoint, a CLI command with options) should typically be 1 task.
+- A medium feature (e.g., a new subsystem with 2-3 distinct components) should typically be 2-4 tasks.
+- A plan with more than 5 tasks MUST include explicit justification for why further splitting is necessary. More than 7 tasks should be rare and strongly justified.
+- If two tasks have such tight coupling that neither produces a testable result without the other, they MUST be merged into one task.
 
 Output expectations (for the plan you produce):
 - A set of tasks with unique, stable IDs.
@@ -372,7 +392,7 @@ When you finish you MUST produce an output in Markdown format that includes:
      - Current logic flow in pseudocode (if existing logic is being modified)
      - New logic flow in pseudocode
      - Dependencies (an adjacency list of prerequisite task IDs, or "none")
-   - Keep tasks sized for small, reviewable commits.
+   - Size each task as a cohesive, meaningful deliverable — not as a single file edit or implementation step. Refer to the "Task Decomposition Rules" for detailed sizing guidance.
 
 5. **Testing & Validation**
    - Unit tests and integration tests to add or update.
