@@ -13,7 +13,9 @@
                     "run"
                 ]
             },
-            "args": []
+            "args": [],
+            "console": "integratedTerminal",
+            "internalConsoleOptions": "neverOpen"
         }
     ]
 }
